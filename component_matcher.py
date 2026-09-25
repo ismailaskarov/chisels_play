@@ -2,6 +2,11 @@ import json
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from feedback_store import (
+    find_learned_catalog_item,
+    relevant_feedback_examples,
+)
+
 
 load_dotenv()
 
@@ -151,6 +156,13 @@ CRITICAL RULES:
     one cannot be determined, use -1 rather than inventing the answer.
 13. A low-confidence semantic guess should be NO MATCH.
 14. Do not calculate prices. Only select catalog rows.
+15. previous_human_decisions lists catalog rows that human estimators chose
+    for parts in earlier drawings. These are corrections of past AI mistakes
+    and reflect how this company prices things. When a part is the same as,
+    or clearly similar to, a previous decision's part (same material / same
+    kind of component), choose that decision's catalog_index, even if the
+    wording differs or you would otherwise return -1. Do not apply a decision
+    to a part that is a different material or different kind of component.
 
 The human will be able to override the selected catalog item afterwards.
 """
@@ -163,6 +175,7 @@ The human will be able to override the selected catalog item afterwards.
 def match_parts_to_catalog(
     ai_result,
     price_items,
+    feedback=None,
 ):
     parts = ai_result.get(
         "parts",
@@ -188,6 +201,7 @@ def match_parts_to_catalog(
         part_payload.append({
             "part_index": index,
             "name": part.get("name"),
+            "component_type": part.get("component_type"),
             "material": part.get("material"),
             "quantity": part.get("quantity"),
             "length_mm": part.get("length_mm"),
@@ -207,6 +221,39 @@ def match_parts_to_catalog(
             "price": item["price"],
         })
 
+    catalog_index_by_key = {
+        (
+            item["name"].strip().lower(),
+            item["category"].strip().lower(),
+            item["unit"].strip().lower(),
+        ): item["catalog_index"]
+        for item in catalog
+    }
+
+    human_decisions_payload = []
+
+    for record in relevant_feedback_examples(
+        parts,
+        feedback,
+        price_items,
+    ):
+        decision_catalog_index = catalog_index_by_key.get((
+            str(record.get("catalog_name") or "").strip().lower(),
+            str(record.get("catalog_category") or "").strip().lower(),
+            str(record.get("catalog_unit") or "").strip().lower(),
+        ))
+
+        if decision_catalog_index is None:
+            continue
+
+        human_decisions_payload.append({
+            "part_name": record.get("source_name"),
+            "material": record.get("source_material"),
+            "component_type": record.get("component_type"),
+            "catalog_index": decision_catalog_index,
+            "catalog_name": record.get("catalog_name"),
+        })
+
     prompt_data = {
         "furniture_name": ai_result.get(
             "furniture_name"
@@ -219,6 +266,7 @@ def match_parts_to_catalog(
         ),
         "parts": part_payload,
         "catalog": catalog_payload,
+        "previous_human_decisions": human_decisions_payload,
     }
 
     print(
@@ -226,7 +274,9 @@ def match_parts_to_catalog(
         len(parts),
         "parts and",
         len(catalog),
-        "catalog items to OpenAI matcher.",
+        "catalog items and",
+        len(human_decisions_payload),
+        "previous human decisions to OpenAI matcher.",
     )
 
     response = client.responses.create(
@@ -384,7 +434,25 @@ def match_parts_to_catalog(
                 confidence or 0
             ),
             "reason": reason,
+            "learned": False,
         }
+
+
+        learned_item, learned_score, learned_reason = (
+            find_learned_catalog_item(
+                part,
+                price_items,
+                feedback=feedback or [],
+            )
+        )
+
+        if learned_item is not None:
+            matched_price_item = learned_item
+
+            final_match["price_item"] = learned_item
+            final_match["confidence"] = learned_score
+            final_match["reason"] = learned_reason
+            final_match["learned"] = True
 
         final_matches.append(
             final_match

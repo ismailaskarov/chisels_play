@@ -5,6 +5,10 @@ import streamlit as st
 from calculator import calculate_project
 from price_reader import read_price_data
 from pdf_extractor import extract_furniture
+from feedback_store import (
+    load_match_feedback,
+    save_match_feedback,
+)
 
 from component_matcher import (
     match_parts_to_catalog,
@@ -314,6 +318,59 @@ def apply_ai_data(
     )
 
 
+def remember_catalog_choice(
+    part_index
+):
+    selected_item = st.session_state.get(
+        f"catalog_select_"
+        f"{part_index}"
+    )
+
+    if selected_item is None:
+        return
+
+    for match in (
+        st.session_state[
+            "catalog_matches"
+        ]
+        or []
+    ):
+
+        if (
+            match["part_index"]
+            != part_index
+        ):
+            continue
+
+        saved = save_match_feedback(
+            match["ai_part"],
+            selected_item,
+        )
+
+        if saved:
+
+            st.session_state[
+                "feedback_notice"
+            ] = (
+                f'Remembered: '
+                f'"{match["ai_part"].get("name")}" '
+                f'→ {selected_item["name"]}. '
+                f'Similar parts will get this '
+                f'suggestion in future drawings.'
+            )
+
+        else:
+
+            st.session_state[
+                "feedback_notice"
+            ] = (
+                "Could not save this choice "
+                "for future suggestions."
+            )
+
+        return
+
+
 # --------------------------------------------------
 # CLEAR
 # --------------------------------------------------
@@ -504,6 +561,9 @@ if uploaded_file is not None:
                     match_parts_to_catalog(
                         ai_data,
                         all_items,
+                        feedback=(
+                            load_match_feedback()
+                        ),
                     )
                 )
 
@@ -619,8 +679,24 @@ if matches:
 
     st.caption(
         "AI chooses an existing price-list "
-        "row. You can override any choice."
+        "row. You can override any choice — "
+        "your choice is remembered and "
+        "suggested for similar parts later."
     )
+
+
+    feedback_notice = (
+        st.session_state.pop(
+            "feedback_notice",
+            None,
+        )
+    )
+
+    if feedback_notice:
+
+        st.toast(
+            feedback_notice
+        )
 
 
     for match in matches:
@@ -832,11 +908,27 @@ if matches:
                     f"catalog_select_"
                     f"{part_index}"
                 ),
+                on_change=(
+                    remember_catalog_choice
+                ),
+                args=(
+                    part_index,
+                ),
             )
         )
 
 
-        if reason:
+        if match.get(
+            "learned"
+        ):
+
+            st.info(
+                f"Suggested from a previous "
+                f"estimator's choice. "
+                f"{reason}"
+            )
+
+        elif reason:
 
             st.caption(
                 f"AI reasoning: "
