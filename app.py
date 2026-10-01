@@ -14,6 +14,7 @@ from component_matcher import (
     match_parts_to_catalog,
     calculate_quantity,
     is_valid_price_item,
+    explain_match,
 )
 
 
@@ -316,6 +317,103 @@ def apply_ai_data(
     print(
         "AI extraction applied."
     )
+
+
+CHECK_LABELS = {
+    "previous_choice": "Previous choice",
+    "material": "Material",
+    "component_type": "Component type",
+    "brand_model": "Brand/model",
+    "thickness": "Thickness",
+    "unit": "Unit",
+    "keywords": "Keywords",
+}
+
+CHECK_RESULT_STYLES = {
+    "match": ("green", "✓", "match"),
+    "partial": ("orange", "~", "partial"),
+    "mismatch": ("red", "✗", "conflict"),
+    "not_applicable": ("gray", "–", "not checked"),
+}
+
+
+def same_catalog_item(
+    first,
+    second,
+):
+    if first is None or second is None:
+        return False
+
+    return (
+        first["name"],
+        first["category"],
+        first["unit"],
+        float(first["price"]),
+    ) == (
+        second["name"],
+        second["category"],
+        second["unit"],
+        float(second["price"]),
+    )
+
+
+def show_match_explanation(
+    checks,
+    manual_choice,
+):
+    badges = []
+
+    for check in checks:
+
+        if check["result"] == "not_applicable":
+            continue
+
+        color, icon, _ = (
+            CHECK_RESULT_STYLES[
+                check["result"]
+            ]
+        )
+
+        badges.append(
+            f':{color}-badge['
+            f'{icon} '
+            f'{CHECK_LABELS[check["aspect"]]}'
+            f']'
+        )
+
+    if badges:
+
+        st.markdown(
+            " ".join(badges)
+        )
+
+    with st.expander(
+        "Why this match",
+        expanded=False,
+    ):
+
+        if manual_choice:
+
+            st.caption(
+                "Your own choice: material, component "
+                "type and brand/model are only checked "
+                "for the AI's pick."
+            )
+
+        for check in checks:
+
+            _, icon, result_text = (
+                CHECK_RESULT_STYLES[
+                    check["result"]
+                ]
+            )
+
+            st.markdown(
+                f'{icon} '
+                f'**{CHECK_LABELS[check["aspect"]]}** '
+                f'({result_text}): '
+                f'{check["detail"]}'
+            )
 
 
 def remember_catalog_choice(
@@ -933,6 +1031,33 @@ if matches:
             st.caption(
                 f"AI reasoning: "
                 f"{reason}"
+            )
+
+
+        if selected_item is not None:
+
+            ai_choice = same_catalog_item(
+                selected_item,
+                ai_price_item,
+            )
+
+            show_match_explanation(
+                explain_match(
+                    ai_part,
+                    selected_item,
+                    ai_checks=(
+                        match.get("checks")
+                        if ai_choice
+                        else None
+                    ),
+                    learned_reason=(
+                        reason
+                        if ai_choice
+                        and match.get("learned")
+                        else None
+                    ),
+                ),
+                manual_choice=not ai_choice,
             )
 
 

@@ -1,10 +1,12 @@
 import json
+import re
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from feedback_store import (
     find_learned_catalog_item,
     relevant_feedback_examples,
+    tokens,
 )
 
 
@@ -163,9 +165,33 @@ CRITICAL RULES:
     kind of component), choose that decision's catalog_index, even if the
     wording differs or you would otherwise return -1. Do not apply a decision
     to a part that is a different material or different kind of component.
+16. For every part, return checks explaining the chosen catalog row, with
+    exactly one entry for each aspect: material, component_type,
+    brand_model and thickness. result is "match", "partial", "mismatch" or
+    "not_applicable" (for example no brand/model on either side, or
+    catalog_index is -1). detail is one short sentence quoting the drawing
+    value and the catalog value, for example
+    "Drawing: Compact juodas; catalog: LMDP negro FENIX".
+    Be honest: use "partial" or "mismatch" when the chosen row differs on
+    that aspect, even though you chose it.
 
 The human will be able to override the selected catalog item afterwards.
 """
+
+
+AI_CHECK_ASPECTS = [
+    "material",
+    "component_type",
+    "brand_model",
+    "thickness",
+]
+
+CHECK_RESULTS = [
+    "match",
+    "partial",
+    "mismatch",
+    "not_applicable",
+]
 
 
 # --------------------------------------------------
@@ -329,12 +355,38 @@ def match_parts_to_catalog(
                                     "reason": {
                                         "type": "string"
                                     },
+                                    "checks": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "aspect": {
+                                                    "type": "string",
+                                                    "enum": AI_CHECK_ASPECTS,
+                                                },
+                                                "result": {
+                                                    "type": "string",
+                                                    "enum": CHECK_RESULTS,
+                                                },
+                                                "detail": {
+                                                    "type": "string"
+                                                },
+                                            },
+                                            "required": [
+                                                "aspect",
+                                                "result",
+                                                "detail",
+                                            ],
+                                            "additionalProperties": False,
+                                        },
+                                    },
                                 },
                                 "required": [
                                     "part_index",
                                     "catalog_index",
                                     "confidence",
                                     "reason",
+                                    "checks",
                                 ],
                                 "additionalProperties": False,
                             },
@@ -397,6 +449,16 @@ def match_parts_to_catalog(
             "No matcher result.",
         )
 
+        ai_checks = [
+            check
+            for check in raw_match.get(
+                "checks",
+                [],
+            )
+            if check.get("aspect") in AI_CHECK_ASPECTS
+            and check.get("result") in CHECK_RESULTS
+        ]
+
         matched_catalog_item = None
         matched_price_item = None
 
@@ -434,6 +496,12 @@ def match_parts_to_catalog(
                 confidence or 0
             ),
             "reason": reason,
+            "checks": (
+                ai_checks
+                if matched_price_item
+                is not None
+                else []
+            ),
             "learned": False,
         }
 
@@ -447,6 +515,9 @@ def match_parts_to_catalog(
         )
 
         if learned_item is not None:
+            if learned_item is not matched_price_item:
+                final_match["checks"] = []
+
             matched_price_item = learned_item
 
             final_match["price_item"] = learned_item
@@ -655,3 +726,192 @@ def calculate_quantity(
 
 
     return None
+
+
+EXPECTED_UNITS = {
+    "panel": {"m2"},
+    "glass": {"m2"},
+    "mirror": {"m2"},
+    "profile": {"m"},
+    "edge": {"m"},
+    "led": {"m", "pcs", "set"},
+    "hardware": {"pcs", "set"},
+}
+
+CHECK_ORDER = [
+    "previous_choice",
+    "material",
+    "component_type",
+    "brand_model",
+    "thickness",
+    "unit",
+    "keywords",
+]
+
+
+def catalog_thickness_mm(
+    item_name,
+):
+    found = re.search(
+        r"(\d+(?:[.,]\d+)?)\s*mm",
+        str(item_name or "").lower(),
+    )
+
+    if not found:
+        return None
+
+    return float(
+        found.group(1).replace(",", ".")
+    )
+
+
+def check_thickness(
+    ai_part,
+    price_item,
+):
+    part_thickness = safe_float(
+        ai_part.get("thickness_mm")
+    )
+
+    item_thickness = catalog_thickness_mm(
+        price_item.get("name")
+    )
+
+    if part_thickness is None or item_thickness is None:
+        return None
+
+    return {
+        "aspect": "thickness",
+        "result": (
+            "match"
+            if abs(part_thickness - item_thickness) <= 0.5
+            else "mismatch"
+        ),
+        "detail": (
+            f"Drawing: {part_thickness:g} mm; "
+            f"catalog: {item_thickness:g} mm."
+        ),
+    }
+
+
+def check_unit(
+    ai_part,
+    price_item,
+):
+    component_type = str(
+        ai_part.get("component_type") or ""
+    ).strip().lower()
+
+    expected = EXPECTED_UNITS.get(
+        component_type
+    )
+
+    unit = normalize_unit(
+        price_item.get("unit")
+    )
+
+    if not expected or not unit:
+        return {
+            "aspect": "unit",
+            "result": "not_applicable",
+            "detail": (
+                f"Catalog unit: {price_item.get('unit')}."
+            ),
+        }
+
+    return {
+        "aspect": "unit",
+        "result": (
+            "match"
+            if unit in expected
+            else "mismatch"
+        ),
+        "detail": (
+            f"{component_type.capitalize()} parts are usually priced per "
+            f"{' / '.join(sorted(expected))}; "
+            f"catalog unit: {price_item.get('unit')}."
+        ),
+    }
+
+
+def check_keywords(
+    ai_part,
+    price_item,
+):
+    part_words = {
+        word
+        for word in (
+            tokens(ai_part.get("name"))
+            | tokens(ai_part.get("material"))
+        )
+        if len(word) > 2 and not word.isdigit()
+    }
+
+    shared = sorted(
+        part_words
+        & tokens(price_item.get("name"))
+    )
+
+    if shared:
+        return {
+            "aspect": "keywords",
+            "result": "match",
+            "detail": (
+                f"Shared words: {', '.join(shared)}."
+            ),
+        }
+
+    return {
+        "aspect": "keywords",
+        "result": "not_applicable",
+        "detail": (
+            "No shared words (the drawing and the price list "
+            "may use different languages)."
+        ),
+    }
+
+
+def explain_match(
+    ai_part,
+    price_item,
+    ai_checks=None,
+    learned_reason=None,
+):
+    if price_item is None:
+        return []
+
+    checks = {}
+
+    for check in ai_checks or []:
+        checks[check["aspect"]] = check
+
+    computed_thickness = check_thickness(
+        ai_part,
+        price_item,
+    )
+
+    if computed_thickness is not None:
+        checks["thickness"] = computed_thickness
+
+    checks["unit"] = check_unit(
+        ai_part,
+        price_item,
+    )
+
+    checks["keywords"] = check_keywords(
+        ai_part,
+        price_item,
+    )
+
+    if learned_reason:
+        checks["previous_choice"] = {
+            "aspect": "previous_choice",
+            "result": "match",
+            "detail": learned_reason,
+        }
+
+    return [
+        checks[aspect]
+        for aspect in CHECK_ORDER
+        if aspect in checks
+    ]
