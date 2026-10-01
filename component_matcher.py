@@ -5,6 +5,7 @@ from openai import OpenAI
 
 from feedback_store import (
     find_learned_catalog_item,
+    record_votes,
     relevant_feedback_examples,
     tokens,
 )
@@ -159,7 +160,8 @@ CRITICAL RULES:
 13. A low-confidence semantic guess should be NO MATCH.
 14. Do not calculate prices. Only select catalog rows.
 15. previous_human_decisions lists catalog rows that human estimators chose
-    for parts in earlier drawings. These are corrections of past AI mistakes
+    for parts in earlier drawings; times_chosen is how many times estimators
+    made that choice, so prefer decisions chosen more often. These are corrections of past AI mistakes
     and reflect how this company prices things. When a part is the same as,
     or clearly similar to, a previous decision's part (same material / same
     kind of component), choose that decision's catalog_index, even if the
@@ -278,6 +280,7 @@ def match_parts_to_catalog(
             "component_type": record.get("component_type"),
             "catalog_index": decision_catalog_index,
             "catalog_name": record.get("catalog_name"),
+            "times_chosen": record_votes(record),
         })
 
     prompt_data = {
@@ -492,6 +495,7 @@ def match_parts_to_catalog(
                 else -1
             ),
             "price_item": matched_price_item,
+            "ai_price_item": matched_price_item,
             "confidence": float(
                 confidence or 0
             ),
@@ -503,10 +507,11 @@ def match_parts_to_catalog(
                 else []
             ),
             "learned": False,
+            "learned_record_key": None,
         }
 
 
-        learned_item, learned_score, learned_reason = (
+        learned_item, learned_score, learned_reason, learned_record = (
             find_learned_catalog_item(
                 part,
                 price_items,
@@ -524,6 +529,7 @@ def match_parts_to_catalog(
             final_match["confidence"] = learned_score
             final_match["reason"] = learned_reason
             final_match["learned"] = True
+            final_match["learned_record_key"] = learned_record.get("source_key")
 
         final_matches.append(
             final_match

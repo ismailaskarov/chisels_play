@@ -1,3 +1,5 @@
+import csv
+import io
 from pathlib import Path
 
 import streamlit as st
@@ -6,7 +8,11 @@ from calculator import calculate_project
 from price_reader import read_price_data
 from pdf_extractor import extract_furniture
 from feedback_store import (
+    delete_match_feedback,
+    feedback_storage_name,
     load_match_feedback,
+    record_votes,
+    remove_match_vote,
     save_match_feedback,
 )
 
@@ -424,9 +430,6 @@ def remember_catalog_choice(
         f"{part_index}"
     )
 
-    if selected_item is None:
-        return
-
     for match in (
         st.session_state[
             "catalog_matches"
@@ -440,10 +443,54 @@ def remember_catalog_choice(
         ):
             continue
 
+        if match.get(
+            "saved_record_key"
+        ):
+
+            remove_match_vote(
+                match[
+                    "saved_record_key"
+                ]
+            )
+
+            match[
+                "saved_record_key"
+            ] = None
+
+        elif (
+            selected_item is not None
+            and match.get(
+                "learned_record_key"
+            )
+            and not match.get(
+                "learned_vote_removed"
+            )
+        ):
+
+            remove_match_vote(
+                match[
+                    "learned_record_key"
+                ]
+            )
+
+            match[
+                "learned_vote_removed"
+            ] = True
+
+        if selected_item is None:
+            return
+
         saved = save_match_feedback(
             match["ai_part"],
             selected_item,
+            ai_item=match.get(
+                "ai_price_item"
+            ),
         )
+
+        match[
+            "saved_record_key"
+        ] = saved
 
         if saved:
 
@@ -766,6 +813,8 @@ matches = (
 
 confirmed_items = []
 
+confirmed_choices = []
+
 
 if matches:
 
@@ -1018,12 +1067,25 @@ if matches:
 
         if match.get(
             "learned"
+        ) and same_catalog_item(
+            selected_item,
+            ai_price_item,
         ):
 
             st.info(
                 f"Suggested from a previous "
                 f"estimator's choice. "
                 f"{reason}"
+            )
+
+        elif match.get(
+            "learned"
+        ):
+
+            st.caption(
+                f'Previous estimators suggested '
+                f'{ai_price_item["name"]}. '
+                f'Your choice replaces it.'
             )
 
         elif reason:
@@ -1224,6 +1286,13 @@ if matches:
             ],
         })
 
+        confirmed_choices.append(
+            (
+                match,
+                selected_item,
+            )
+        )
+
 
 # --------------------------------------------------
 # AI ESTIMATE
@@ -1299,10 +1368,18 @@ if confirmed_items:
         )
 
 
-    if st.button(
+    use_estimate = st.button(
         "Use this estimate",
         type="primary",
-    ):
+    )
+
+    st.caption(
+        "Using the estimate also confirms its "
+        "price-list items, so they are suggested "
+        "more strongly for similar parts later."
+    )
+
+    if use_estimate:
 
         st.session_state[
             "items"
@@ -1311,6 +1388,25 @@ if confirmed_items:
             for item
             in confirmed_items
         ]
+
+        for match, selected_item in (
+            confirmed_choices
+        ):
+
+            if match.get(
+                "saved_record_key"
+            ):
+                continue
+
+            match[
+                "saved_record_key"
+            ] = save_match_feedback(
+                match["ai_part"],
+                selected_item,
+                ai_item=match.get(
+                    "ai_price_item"
+                ),
+            )
 
         print(
             "Estimate applied:",
@@ -1823,6 +1919,182 @@ if st.session_state[
                 f'€'
                 f'{result["total"]:.2f}'
             ),
+        )
+
+
+def delete_selected_corrections():
+    for source_key in (
+        st.session_state.get(
+            "feedback_delete_select"
+        )
+        or []
+    ):
+
+        delete_match_feedback(
+            source_key
+        )
+
+    st.session_state[
+        "feedback_delete_select"
+    ] = []
+
+
+st.divider()
+
+st.subheader(
+    "Learned corrections"
+)
+
+
+if st.toggle(
+    "Show learned corrections",
+    key="show_learned_corrections",
+):
+
+    if (
+        feedback_storage_name()
+        == "Supabase"
+    ):
+
+        st.caption(
+            "Stored in Supabase: shared by "
+            "all users and kept permanently."
+        )
+
+    else:
+
+        st.warning(
+            "Stored in a local file on the "
+            "server. On Streamlit Cloud it is "
+            "lost when the app restarts. Set "
+            "up Supabase to keep it."
+        )
+
+
+    corrections = sorted(
+        [
+            record
+            for record in (
+                load_match_feedback()
+            )
+            if record_votes(record) > 0
+        ],
+        key=lambda record: str(
+            record.get("updated_at")
+            or ""
+        ),
+        reverse=True,
+    )
+
+
+    if not corrections:
+
+        st.info(
+            "No corrections saved yet."
+        )
+
+    else:
+
+        correction_rows = [
+            {
+                "Part": record.get(
+                    "source_name"
+                ),
+                "Material": record.get(
+                    "source_material"
+                ),
+                "Type": record.get(
+                    "component_type"
+                ),
+                "Chosen item": record.get(
+                    "catalog_name"
+                ),
+                "Category": record.get(
+                    "catalog_category"
+                ),
+                "Unit": record.get(
+                    "catalog_unit"
+                ),
+                "AI suggested": (
+                    record.get(
+                        "ai_catalog_name"
+                    )
+                    or "-"
+                ),
+                "Times chosen": record_votes(
+                    record
+                ),
+                "Last chosen": str(
+                    record.get("updated_at")
+                    or ""
+                )[:10],
+            }
+            for record in corrections
+        ]
+
+
+        st.dataframe(
+            correction_rows,
+            hide_index=True,
+        )
+
+
+        csv_buffer = io.StringIO()
+
+        writer = csv.DictWriter(
+            csv_buffer,
+            fieldnames=list(
+                correction_rows[0].keys()
+            ),
+        )
+
+        writer.writeheader()
+
+        writer.writerows(
+            correction_rows
+        )
+
+        st.download_button(
+            "Download CSV",
+            data=(
+                csv_buffer
+                .getvalue()
+                .encode("utf-8-sig")
+            ),
+            file_name=(
+                "learned_corrections.csv"
+            ),
+            mime="text/csv",
+        )
+
+
+        corrections_by_key = {
+            record["source_key"]: record
+            for record in corrections
+        }
+
+        selected_for_delete = (
+            st.multiselect(
+                "Wrong corrections to delete",
+                list(
+                    corrections_by_key.keys()
+                ),
+                format_func=(
+                    lambda source_key:
+                    (
+                        f'{corrections_by_key[source_key].get("source_name")} '
+                        f'→ {corrections_by_key[source_key].get("catalog_name")} '
+                        f'({record_votes(corrections_by_key[source_key])}×)'
+                    )
+                ),
+                key="feedback_delete_select",
+            )
+        )
+
+        st.button(
+            "Delete selected",
+            disabled=not selected_for_delete,
+            on_click=delete_selected_corrections,
         )
 
 
