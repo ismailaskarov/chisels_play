@@ -553,6 +553,15 @@ def show_market_check(
 
         groups = result["groups"]
 
+        if result.get("shops") == 1:
+
+            st.warning(
+                f'All prices come from one shop '
+                f'({", ".join(result.get("shop_names") or [])}), '
+                f"so this is that shop's price, "
+                f'not a market average.'
+            )
+
         list_price = None
 
         if (
@@ -609,6 +618,15 @@ def show_market_check(
                     f'{group["shops"]} / {group["offers"]}',
                 )
 
+            if group["similar_left_out"]:
+
+                st.caption(
+                    f'The average uses only exact '
+                    f'matches. {group["similar_left_out"]} '
+                    f'similar product(s) are listed '
+                    f'below but not averaged.'
+                )
+
             if list_price is not None:
 
                 difference = (
@@ -645,6 +663,9 @@ def show_market_check(
                     "Highest": group["max"],
                     "Shops / offers": (
                         f'{group["shops"]} / {group["offers"]}'
+                    ),
+                    "Similar, not averaged": (
+                        group["similar_left_out"]
                     ),
                 }
 
@@ -703,6 +724,11 @@ def show_market_check(
                             ]
                         ),
                         "Match": offer["match"],
+                        "In average": (
+                            "✓"
+                            if offer.get("in_average")
+                            else "–"
+                        ),
                         "Link": offer["url"],
                     }
                     for offer in result["offers"]
@@ -1194,15 +1220,16 @@ if st.session_state[
                 "Quantity:",
                 part.get(
                     "quantity"
-                ),
+                )
+                or "–",
             )
 
             st.write(
                 "Dimensions:",
                 (
-                    f'{part.get("length_mm")} × '
-                    f'{part.get("width_mm")} × '
-                    f'{part.get("height_mm")} mm'
+                    f'{part.get("length_mm") or "–"} × '
+                    f'{part.get("width_mm") or "–"} × '
+                    f'{part.get("height_mm") or "–"} mm'
                 ),
             )
 
@@ -1314,7 +1341,7 @@ if matches:
                 ai_part.get(
                     "material"
                 )
-                or "-"
+                or "–"
             )
 
 
@@ -1328,7 +1355,7 @@ if matches:
                 ai_part.get(
                     "quantity"
                 )
-                or "-"
+                or "–"
             )
 
 
@@ -1342,14 +1369,14 @@ if matches:
                 ai_part.get(
                     "length_mm"
                 )
-                or "-"
+                or "–"
             )
 
             width = (
                 ai_part.get(
                     "width_mm"
                 )
-                or "-"
+                or "–"
             )
 
             st.write(

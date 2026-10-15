@@ -1,6 +1,6 @@
 import json
 import re
-from statistics import mean
+from statistics import mean, median
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
@@ -16,6 +16,10 @@ client = OpenAI()
 LT_VAT_RATE = 0.21
 
 THICKNESS_TOLERANCE_MM = 0.5
+
+UNUSUAL_PRICE_FACTOR = 2.5
+
+MIN_OFFERS_FOR_UNUSUAL_CHECK = 3
 
 MARKET_SEARCH_INSTRUCTIONS = """
 You research current market prices in Lithuania for a furniture manufacturer.
@@ -167,16 +171,38 @@ def offer_price_per_unit(offer, target_unit):
     return None, f"priced per {offer.get('price_unit')}"
 
 
+def split_unusual_prices(offers):
+    if len(offers) < MIN_OFFERS_FOR_UNUSUAL_CHECK:
+        return offers, []
+    typical = median(offer["price_excl_vat_per_unit"] for offer in offers)
+    normal = []
+    unusual = []
+    for offer in offers:
+        price = offer["price_excl_vat_per_unit"]
+        if price < typical / UNUSUAL_PRICE_FACTOR or price > typical * UNUSUAL_PRICE_FACTOR:
+            unusual.append((offer, f"unusual price, €{price:.2f} vs typical €{typical:.2f}"))
+        else:
+            normal.append(offer)
+    return normal, unusual
+
+
 def summarize_group(offers, thickness):
-    prices = [offer["price_excl_vat_per_unit"] for offer in offers]
+    exact = [offer for offer in offers if offer.get("match") == "exact"]
+    averaged = exact or offers
+    for offer in offers:
+        offer["in_average"] = offer in averaged
+    prices = [offer["price_excl_vat_per_unit"] for offer in averaged]
     return {
         "thickness": thickness,
         "label": f"{thickness:g} mm" if thickness else "thickness not stated",
         "average": round(mean(prices), 2),
         "min": min(prices),
         "max": max(prices),
-        "offers": len(offers),
-        "shops": len({domain_of(offer.get("url")) for offer in offers}),
+        "offers": len(averaged),
+        "similar_left_out": len(offers) - len(averaged),
+        "exact_only": bool(exact) and len(exact) < len(offers),
+        "shops": len({domain_of(offer.get("url")) for offer in averaged}),
+        "shop_names": sorted({offer.get("shop") or domain_of(offer.get("url")) for offer in averaged}),
     }
 
 
@@ -218,6 +244,9 @@ def summarize_offers(offers, target_unit, allowed_domains=None, target_thickness
             "price_excl_vat_per_unit": round(unit_price, 2),
         })
 
+    used, unusual = split_unusual_prices(used)
+    skipped.extend(unusual)
+
     grouped = {}
     for offer in used:
         key = None if target_thickness else offer["thickness"]
@@ -241,6 +270,7 @@ def summarize_offers(offers, target_unit, allowed_domains=None, target_thickness
         "max": single["max"] if single else None,
         "count": len(used),
         "shops": len({domain_of(offer.get("url")) for offer in used}),
+        "shop_names": sorted({offer.get("shop") or domain_of(offer.get("url")) for offer in used}),
     }
 
 
