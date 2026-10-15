@@ -244,18 +244,35 @@ def summarize_offers(offers, target_unit, allowed_domains=None, target_thickness
             "price_excl_vat_per_unit": round(unit_price, 2),
         })
 
-    used, unusual = split_unusual_prices(used)
-    skipped.extend(unusual)
-
     grouped = {}
     for offer in used:
         key = None if target_thickness else offer["thickness"]
         grouped.setdefault(key, []).append(offer)
 
+    for key, group_offers in list(grouped.items()):
+        normal, unusual = split_unusual_prices(group_offers)
+        grouped[key] = normal
+        skipped.extend(unusual)
+
+    kept = {id(offer) for group_offers in grouped.values() for offer in group_offers}
+    used = [offer for offer in used if id(offer) in kept]
+
     groups = sorted(
         (summarize_group(group_offers, target_thickness or key) for key, group_offers in grouped.items()),
         key=lambda group: (group["thickness"] is None, group["thickness"] or 0),
     )
+
+    for group in groups:
+        notes = []
+        if group["offers"] == 1:
+            notes.append("only 1 offer")
+        thinner = [
+            other for other in groups
+            if other["thickness"] and group["thickness"] and other["thickness"] < group["thickness"]
+        ]
+        if any(group["average"] < other["average"] / UNUSUAL_PRICE_FACTOR for other in thinner):
+            notes.append("much cheaper than thinner boards, check this price")
+        group["note"] = "; ".join(notes)
 
     single = groups[0] if len(groups) == 1 else None
 

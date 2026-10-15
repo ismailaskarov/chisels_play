@@ -618,6 +618,19 @@ def safe_float(value):
 # CALCULATE QUANTITY
 # --------------------------------------------------
 
+def positive_mm(
+    value,
+):
+    number = safe_float(
+        value
+    )
+
+    if number is None or number <= 0:
+        return None
+
+    return number
+
+
 def calculate_quantity(
     ai_part,
     price_item,
@@ -630,18 +643,23 @@ def calculate_quantity(
         ai_part.get("quantity")
     )
 
-    if pieces is None or pieces <= 0:
+    count_known = (
+        pieces is not None
+        and pieces > 0
+    )
+
+    if not count_known:
         pieces = 1.0
 
-    length_mm = safe_float(
+    length_mm = positive_mm(
         ai_part.get("length_mm")
     )
 
-    width_mm = safe_float(
+    width_mm = positive_mm(
         ai_part.get("width_mm")
     )
 
-    height_mm = safe_float(
+    height_mm = positive_mm(
         ai_part.get("height_mm")
     )
 
@@ -658,9 +676,8 @@ def calculate_quantity(
         if dimension_1 is None:
             dimension_1 = height_mm
 
-        if dimension_2 is None:
-            if height_mm != dimension_1:
-                dimension_2 = height_mm
+        elif dimension_2 is None:
+            dimension_2 = height_mm
 
         if (
             dimension_1 is None
@@ -703,7 +720,7 @@ def calculate_quantity(
     # ----------------------------------------------
 
     if unit == "pcs":
-        return pieces
+        return pieces if count_known else None
 
 
     # ----------------------------------------------
@@ -711,7 +728,7 @@ def calculate_quantity(
     # ----------------------------------------------
 
     if unit == "set":
-        return pieces
+        return pieces if count_known else None
 
 
     # ----------------------------------------------
@@ -719,7 +736,7 @@ def calculate_quantity(
     # ----------------------------------------------
 
     if unit == "fixed":
-        return pieces
+        return pieces if count_known else None
 
 
     # ----------------------------------------------

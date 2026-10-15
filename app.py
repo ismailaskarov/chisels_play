@@ -452,7 +452,7 @@ def show_market_check(
     )
 
     with st.expander(
-        "Market price check (Lithuanian shops)",
+        "Market price check",
         expanded=(
             result is not None
             or selected_item is None
@@ -472,7 +472,7 @@ def show_market_check(
         ):
 
             with st.spinner(
-                "Searching Lithuanian shops..."
+                "Searching shops..."
             ):
 
                 try:
@@ -522,8 +522,8 @@ def show_market_check(
         if result is None:
 
             st.caption(
-                "Searches shops selling in Lithuania "
-                "for this part. Prices are shown "
+                "Searches online shops for this "
+                "part. Prices are shown "
                 "without 21% VAT. The price-list "
                 "price always comes first."
             )
@@ -618,6 +618,12 @@ def show_market_check(
                     f'{group["shops"]} / {group["offers"]}',
                 )
 
+            if group.get("note"):
+
+                st.caption(
+                    f'Note: {group["note"]}.'
+                )
+
             if group["similar_left_out"]:
 
                 st.caption(
@@ -667,6 +673,7 @@ def show_market_check(
                     "Similar, not averaged": (
                         group["similar_left_out"]
                     ),
+                    "Note": group.get("note") or "",
                 }
 
                 if list_price is not None:
@@ -873,6 +880,16 @@ def remember_catalog_choice(
             != part_index
         ):
             continue
+
+        match.pop(
+            "market_result",
+            None,
+        )
+
+        match.pop(
+            "market_error",
+            None,
+        )
 
         if match.get(
             "saved_record_key"
@@ -1168,6 +1185,21 @@ if uploaded_file is not None:
                 repr(error),
             )
 
+            if (
+                st.session_state[
+                    "catalog_matches"
+                ]
+                is None
+            ):
+
+                st.session_state[
+                    "ai_result"
+                ] = None
+
+                st.session_state[
+                    "ai_parts"
+                ] = []
+
             st.error(
                 f"AI processing failed: "
                 f"{error}"
@@ -1379,9 +1411,17 @@ if matches:
                 or "–"
             )
 
+            height = (
+                ai_part.get(
+                    "height_mm"
+                )
+                or "–"
+            )
+
             st.write(
                 f"{length} × "
-                f"{width} mm"
+                f"{width} × "
+                f"{height} mm"
             )
 
 

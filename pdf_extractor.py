@@ -339,34 +339,53 @@ def analyze_pdf(
         uploaded_file.id,
     )
 
-    response = client.responses.create(
-        model="gpt-5.6-terra",
+    try:
+        response = client.responses.create(
+            model="gpt-5.6-terra",
 
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_file",
-                        "file_id": uploaded_file.id,
-                    },
-                    {
-                        "type": "input_text",
-                        "text": PROMPT,
-                    },
-                ],
-            }
-        ],
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "file_id": uploaded_file.id,
+                        },
+                        {
+                            "type": "input_text",
+                            "text": PROMPT,
+                        },
+                    ],
+                }
+            ],
 
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "furniture_bom_extraction",
-                "strict": True,
-                "schema": FURNITURE_SCHEMA,
-            }
-        },
-    )
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "furniture_bom_extraction",
+                    "strict": True,
+                    "schema": FURNITURE_SCHEMA,
+                }
+            },
+        )
+
+    finally:
+        try:
+            client.files.delete(
+                uploaded_file.id
+            )
+
+            print(
+                "Deleted OpenAI file:",
+                uploaded_file.id,
+            )
+
+        except Exception as error:
+            print(
+                "Could not delete OpenAI file:",
+                uploaded_file.id,
+                repr(error),
+            )
 
     print(
         "PDF BOM analysis complete."
