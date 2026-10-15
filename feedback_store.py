@@ -155,17 +155,46 @@ def find_price_item(record, price_items):
     return None
 
 
-def load_local_feedback():
+def set_aside_unreadable_feedback():
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    backup = LOCAL_FEEDBACK_FILE.with_name(f"match_feedback.unreadable-{stamp}.json")
+    try:
+        os.replace(LOCAL_FEEDBACK_FILE, backup)
+        print("Unreadable feedback file kept as:", backup)
+    except Exception as error:
+        print("Could not set aside unreadable feedback file:", error)
+
+
+def read_local_records():
     if not LOCAL_FEEDBACK_FILE.exists():
         return []
     try:
         with open(LOCAL_FEEDBACK_FILE, "r", encoding="utf-8") as file:
             data = json.load(file)
-        if isinstance(data, list):
-            return data
-    except Exception as error:
-        print("Could not read feedback:", error)
+    except ValueError as error:
+        print("Feedback file is damaged:", error)
+        set_aside_unreadable_feedback()
+        return []
+    except OSError as error:
+        print("Could not open feedback file:", error)
+        return None
+    if isinstance(data, list):
+        return data
+    print("Feedback file does not contain a list.")
+    set_aside_unreadable_feedback()
     return []
+
+
+def load_local_feedback():
+    records = read_local_records()
+    return records if records is not None else []
+
+
+def records_for_update():
+    records = read_local_records()
+    if records is None:
+        raise RuntimeError("feedback file could not be opened, not overwriting it")
+    return records
 
 
 def write_local_feedback(records):
@@ -197,7 +226,7 @@ def apply_vote(existing, new_record, delta):
 
 def vote_local(source_key, new_record, delta):
     with _local_file_lock:
-        records = load_local_feedback()
+        records = records_for_update()
         existing = next((r for r in records if r.get("source_key") == source_key), None)
         record = apply_vote(existing, new_record, delta)
         if record is None:
@@ -210,7 +239,7 @@ def vote_local(source_key, new_record, delta):
 
 def delete_local(source_key):
     with _local_file_lock:
-        records = load_local_feedback()
+        records = records_for_update()
         remaining = [r for r in records if r.get("source_key") != source_key]
         if len(remaining) != len(records):
             write_local_feedback(remaining)

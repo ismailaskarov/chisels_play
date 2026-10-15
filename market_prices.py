@@ -1,12 +1,17 @@
 import json
-import re
 from statistics import mean, median
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from component_matcher import EXPECTED_UNITS, normalize_unit, safe_float
+from component_matcher import (
+    EXPECTED_UNITS,
+    normalize_unit,
+    plausible_thickness,
+    safe_float,
+    thickness_from_text,
+)
 
 
 load_dotenv()
@@ -102,33 +107,6 @@ def target_unit_for(ai_part, price_item=None):
     return "pcs"
 
 
-NUMBER = r"(\d+(?:[.,]\d+)?)"
-
-SIZE_PATTERN = re.compile(
-    NUMBER + r"\s*[x×*]\s*" + NUMBER + r"(?:\s*[x×*]\s*" + NUMBER + r")?(?:\s*mm\b)?"
-)
-
-MAX_THICKNESS_MM = 100
-
-
-def plausible_thickness(value):
-    thickness = safe_float(value)
-    if thickness is None or thickness <= 0 or thickness > MAX_THICKNESS_MM:
-        return None
-    return thickness
-
-
-def thickness_from_text(text):
-    text = str(text or "").lower()
-    for size in SIZE_PATTERN.finditer(text):
-        if size.group(3):
-            return plausible_thickness(size.group(3).replace(",", "."))
-    found = re.search(NUMBER + r"\s*mm\b", SIZE_PATTERN.sub(" ", text))
-    if not found:
-        return None
-    return plausible_thickness(found.group(1).replace(",", "."))
-
-
 def target_thickness_for(ai_part, price_item=None):
     thickness = plausible_thickness(ai_part.get("thickness_mm"))
     if thickness:
@@ -153,6 +131,14 @@ def domain_of(url):
     except ValueError:
         return ""
     return host[4:] if host.startswith("www.") else host
+
+
+def domain_was_searched(domain, searched):
+    return any(
+        domain == other or domain.endswith("." + other) or other.endswith("." + domain)
+        for other in searched
+        if other
+    )
 
 
 def searched_domains(response):
@@ -184,7 +170,7 @@ def offer_price_per_unit(offer, target_unit):
     if target_unit == "m2" and offer_unit in ("sheet", "pcs"):
         length = safe_float(offer.get("item_length_mm"))
         width = safe_float(offer.get("item_width_mm"))
-        if not length or not width:
+        if not length or not width or length <= 0 or width <= 0:
             return None, f"priced per {offer.get('price_unit')}, size unknown"
         return price / ((length / 1000) * (width / 1000)), ""
 
@@ -237,7 +223,7 @@ def summarize_offers(offers, target_unit, allowed_domains=None, target_thickness
             skipped.append((offer, "no link"))
             continue
         if allowed_domains:
-            if domain not in allowed_domains:
+            if not domain_was_searched(domain, allowed_domains):
                 skipped.append((offer, "not found in the web search"))
                 continue
         elif not domain.endswith(".lt"):

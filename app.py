@@ -652,10 +652,9 @@ def show_market_check(
         else:
 
             st.warning(
-                "Different thicknesses were found and "
-                "the drawing does not say which one is "
-                "needed, so prices are shown separately "
-                "for each thickness."
+                "Different thicknesses were found, so "
+                "prices are shown separately for each "
+                "thickness."
             )
 
             group_rows = []

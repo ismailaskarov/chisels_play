@@ -772,19 +772,38 @@ CHECK_ORDER = [
 ]
 
 
+NUMBER = r"(\d+(?:[.,]\d+)?)"
+
+SIZE_PATTERN = re.compile(
+    NUMBER + r"\s*[x×*]\s*" + NUMBER + r"(?:\s*[x×*]\s*" + NUMBER + r")?(?:\s*mm\b)?"
+)
+
+MAX_THICKNESS_MM = 100
+
+
+def plausible_thickness(value):
+    thickness = safe_float(value)
+    if thickness is None or thickness <= 0 or thickness > MAX_THICKNESS_MM:
+        return None
+    return thickness
+
+
+def thickness_from_text(text):
+    text = str(text or "").lower()
+    for size in SIZE_PATTERN.finditer(text):
+        if size.group(3):
+            return plausible_thickness(size.group(3).replace(",", "."))
+    found = re.search(NUMBER + r"\s*mm\b", SIZE_PATTERN.sub(" ", text))
+    if not found:
+        return None
+    return plausible_thickness(found.group(1).replace(",", "."))
+
+
 def catalog_thickness_mm(
     item_name,
 ):
-    found = re.search(
-        r"(\d+(?:[.,]\d+)?)\s*mm",
-        str(item_name or "").lower(),
-    )
-
-    if not found:
-        return None
-
-    return float(
-        found.group(1).replace(",", ".")
+    return thickness_from_text(
+        item_name
     )
 
 
@@ -792,7 +811,7 @@ def check_thickness(
     ai_part,
     price_item,
 ):
-    part_thickness = safe_float(
+    part_thickness = plausible_thickness(
         ai_part.get("thickness_mm")
     )
 
