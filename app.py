@@ -21,7 +21,9 @@ from component_matcher import (
     calculate_quantity,
     is_valid_price_item,
     explain_match,
+    normalize_unit,
 )
+from market_prices import search_market_prices
 
 
 PRICE_FILE = Path("data") / "prices.xlsx"
@@ -308,6 +310,10 @@ def apply_ai_data(
             str(key).startswith(
                 "catalog_quantity_"
             )
+            or
+            str(key).startswith(
+                "market_"
+            )
         ):
             keys_to_delete.append(
                 key
@@ -420,6 +426,282 @@ def show_match_explanation(
                 f'({result_text}): '
                 f'{check["detail"]}'
             )
+
+
+MARKET_CATEGORY_BY_TYPE = {
+    "panel": "LMDP",
+    "glass": "STIKLAS",
+    "mirror": "STIKLAS",
+    "hardware": "FURNITURA",
+    "profile": "FURNITURA",
+    "edge": "FURNITURA",
+    "led": "FURNITURA",
+    "service": "PASLAUGA",
+}
+
+
+def show_market_check(
+    match,
+    ai_part,
+    selected_item,
+):
+    part_index = match["part_index"]
+
+    result = match.get(
+        "market_result"
+    )
+
+    with st.expander(
+        "Market price check (Lithuanian shops)",
+        expanded=(
+            result is not None
+            or selected_item is None
+        ),
+    ):
+
+        if st.button(
+            (
+                "Check market prices"
+                if result is None
+                else "Search again"
+            ),
+            key=(
+                f"market_check_"
+                f"{part_index}"
+            ),
+        ):
+
+            with st.spinner(
+                "Searching Lithuanian shops..."
+            ):
+
+                try:
+
+                    result = search_market_prices(
+                        ai_part,
+                        selected_item,
+                    )
+
+                    result["searched_for"] = (
+                        selected_item["name"]
+                        if selected_item is not None
+                        else ai_part.get("name")
+                    )
+
+                    match[
+                        "market_result"
+                    ] = result
+
+                except Exception as error:
+
+                    print(
+                        "MARKET PRICE ERROR:",
+                        repr(error),
+                    )
+
+                    st.error(
+                        f"Market price search "
+                        f"failed: {error}"
+                    )
+
+        if result is None:
+
+            st.caption(
+                "Searches Lithuanian (.lt) online "
+                "shops for this part. Prices are "
+                "shown without 21% VAT. The "
+                "price-list price always comes first."
+            )
+
+            return None
+
+        unit = result["unit"]
+
+        st.caption(
+            f'Searched for: '
+            f'{result.get("searched_for")}. '
+            f'Prices per {unit}, without VAT.'
+        )
+
+        if not result["count"]:
+
+            st.warning(
+                "No usable prices were found "
+                "in Lithuanian shops."
+            )
+
+        else:
+
+            c1, c2, c3, c4 = (
+                st.columns(4)
+            )
+
+            with c1:
+
+                st.metric(
+                    "Market average",
+                    f'€{result["average"]:.2f}',
+                )
+
+            with c2:
+
+                st.metric(
+                    "Lowest",
+                    f'€{result["min"]:.2f}',
+                )
+
+            with c3:
+
+                st.metric(
+                    "Highest",
+                    f'€{result["max"]:.2f}',
+                )
+
+            with c4:
+
+                st.metric(
+                    "Shops",
+                    result["count"],
+                )
+
+            if (
+                selected_item is not None
+                and normalize_unit(
+                    selected_item["unit"]
+                )
+                == unit
+            ):
+
+                list_price = float(
+                    selected_item["price"]
+                )
+
+                difference = (
+                    (list_price - result["average"])
+                    / result["average"]
+                    * 100
+                )
+
+                st.info(
+                    f'Price list: €{list_price:.2f}/{unit}, '
+                    f'{abs(difference):.0f}% '
+                    f'{"above" if difference > 0 else "below"} '
+                    f'the market average. The price-list '
+                    f'price is used in the estimate.'
+                )
+
+            st.dataframe(
+                [
+                    {
+                        "Shop": offer["shop"],
+                        "Product": offer["product_name"],
+                        "Shop price": (
+                            f'€{offer["price"]:.2f} / '
+                            f'{offer["price_unit"]}'
+                            + (
+                                " incl. VAT"
+                                if offer["includes_vat"]
+                                else " excl. VAT"
+                            )
+                        ),
+                        f"€ per {unit} excl. VAT": (
+                            offer[
+                                "price_excl_vat_per_unit"
+                            ]
+                        ),
+                        "Match": offer["match"],
+                        "Link": offer["url"],
+                    }
+                    for offer in result["offers"]
+                ],
+                column_config={
+                    "Link": st.column_config.LinkColumn(
+                        "Link"
+                    ),
+                },
+                hide_index=True,
+            )
+
+        if result["skipped"]:
+
+            st.caption(
+                "Not used: "
+                + "; ".join(
+                    f'{offer.get("shop")} '
+                    f'({offer["skip_reason"]})'
+                    for offer in result["skipped"]
+                )
+            )
+
+        if result.get("notes"):
+
+            st.caption(
+                f'Search notes: '
+                f'{result["notes"]}'
+            )
+
+        if (
+            selected_item is not None
+            or not result["count"]
+        ):
+            return None
+
+        category_options = sorted(
+            set(
+                item["category"]
+                for item in valid_catalog_items
+            )
+        )
+
+        default_category = (
+            MARKET_CATEGORY_BY_TYPE.get(
+                str(
+                    ai_part.get("component_type")
+                    or ""
+                ).lower()
+            )
+        )
+
+        category = st.selectbox(
+            "Category for the coefficient",
+            category_options,
+            index=(
+                category_options.index(
+                    default_category
+                )
+                if default_category
+                in category_options
+                else 0
+            ),
+            key=(
+                f"market_category_"
+                f"{part_index}"
+            ),
+        )
+
+        if not st.toggle(
+            (
+                f'Use market price '
+                f'€{result["average"]:.2f}/{unit} '
+                f'in the estimate'
+            ),
+            key=(
+                f"market_use_"
+                f"{part_index}"
+            ),
+        ):
+            return None
+
+        return {
+            "name": (
+                f'{ai_part.get("name")} '
+                f'(market price)'
+            ),
+            "category": category,
+            "unit": unit,
+            "price": result["average"],
+            "market": True,
+        }
 
 
 def remember_catalog_choice(
@@ -583,6 +865,10 @@ def clear_product():
             or
             str(key).startswith(
                 "catalog_quantity_"
+            )
+            or
+            str(key).startswith(
+                "market_"
             )
         ):
             keys_to_delete.append(
@@ -1129,12 +1415,22 @@ if matches:
 
         if selected_item is None:
 
-            st.warning(
-                "This drawing part is not "
-                "included in the estimate yet."
+            market_item = show_market_check(
+                match,
+                ai_part,
+                None,
             )
 
-            continue
+            if market_item is None:
+
+                st.warning(
+                    "This drawing part is not "
+                    "included in the estimate yet."
+                )
+
+                continue
+
+            selected_item = market_item
 
 
         # ------------------------------------------
@@ -1272,6 +1568,17 @@ if matches:
             )
 
 
+        if not selected_item.get(
+            "market"
+        ):
+
+            show_market_check(
+                match,
+                ai_part,
+                selected_item,
+            )
+
+
         confirmed_items.append({
             "name": selected_item[
                 "name"
@@ -1286,12 +1593,16 @@ if matches:
             ],
         })
 
-        confirmed_choices.append(
-            (
-                match,
-                selected_item,
+        if not selected_item.get(
+            "market"
+        ):
+
+            confirmed_choices.append(
+                (
+                    match,
+                    selected_item,
+                )
             )
-        )
 
 
 # --------------------------------------------------
