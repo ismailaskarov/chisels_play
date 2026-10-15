@@ -102,15 +102,35 @@ def target_unit_for(ai_part, price_item=None):
     return "pcs"
 
 
+NUMBER = r"(\d+(?:[.,]\d+)?)"
+
+SIZE_PATTERN = re.compile(
+    NUMBER + r"\s*[x×*]\s*" + NUMBER + r"(?:\s*[x×*]\s*" + NUMBER + r")?(?:\s*mm\b)?"
+)
+
+MAX_THICKNESS_MM = 100
+
+
+def plausible_thickness(value):
+    thickness = safe_float(value)
+    if thickness is None or thickness <= 0 or thickness > MAX_THICKNESS_MM:
+        return None
+    return thickness
+
+
 def thickness_from_text(text):
-    found = re.search(r"(\d+(?:[.,]\d+)?)\s*mm\b", str(text or "").lower())
+    text = str(text or "").lower()
+    for size in SIZE_PATTERN.finditer(text):
+        if size.group(3):
+            return plausible_thickness(size.group(3).replace(",", "."))
+    found = re.search(NUMBER + r"\s*mm\b", SIZE_PATTERN.sub(" ", text))
     if not found:
         return None
-    return float(found.group(1).replace(",", "."))
+    return plausible_thickness(found.group(1).replace(",", "."))
 
 
 def target_thickness_for(ai_part, price_item=None):
-    thickness = safe_float(ai_part.get("thickness_mm"))
+    thickness = plausible_thickness(ai_part.get("thickness_mm"))
     if thickness:
         return thickness, "drawing"
     if price_item is not None:
@@ -121,7 +141,7 @@ def target_thickness_for(ai_part, price_item=None):
 
 
 def offer_thickness(offer):
-    thickness = safe_float(offer.get("thickness_mm"))
+    thickness = plausible_thickness(offer.get("thickness_mm"))
     if thickness:
         return thickness
     return thickness_from_text(offer.get("product_name"))
