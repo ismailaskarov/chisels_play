@@ -492,6 +492,11 @@ def show_market_check(
                         "market_result"
                     ] = result
 
+                    match.pop(
+                        "market_error",
+                        None,
+                    )
+
                 except Exception as error:
 
                     print(
@@ -499,38 +504,78 @@ def show_market_check(
                         repr(error),
                     )
 
-                    st.error(
-                        f"Market price search "
-                        f"failed: {error}"
-                    )
+                    match[
+                        "market_error"
+                    ] = str(error)
+
+            st.rerun()
+
+        if match.get(
+            "market_error"
+        ):
+
+            st.error(
+                f'Market price search failed: '
+                f'{match["market_error"]}'
+            )
 
         if result is None:
 
             st.caption(
-                "Searches Lithuanian (.lt) online "
-                "shops for this part. Prices are "
-                "shown without 21% VAT. The "
-                "price-list price always comes first."
+                "Searches shops selling in Lithuania "
+                "for this part. Prices are shown "
+                "without 21% VAT. The price-list "
+                "price always comes first."
             )
 
             return None
 
         unit = result["unit"]
 
+        thickness_text = ""
+
+        if result.get(
+            "target_thickness"
+        ):
+
+            thickness_text = (
+                f' Thickness: '
+                f'{result["target_thickness"]:g} mm '
+                f'(from the {result["thickness_source"]}).'
+            )
+
         st.caption(
             f'Searched for: '
             f'{result.get("searched_for")}. '
             f'Prices per {unit}, without VAT.'
+            f'{thickness_text}'
         )
 
-        if not result["count"]:
+        groups = result["groups"]
 
-            st.warning(
-                "No usable prices were found "
-                "in Lithuanian shops."
+        list_price = None
+
+        if (
+            selected_item is not None
+            and normalize_unit(
+                selected_item["unit"]
+            )
+            == unit
+        ):
+
+            list_price = float(
+                selected_item["price"]
             )
 
-        else:
+        if not groups:
+
+            st.warning(
+                "No usable prices were found."
+            )
+
+        elif len(groups) == 1:
+
+            group = groups[0]
 
             c1, c2, c3, c4 = (
                 st.columns(4)
@@ -540,45 +585,35 @@ def show_market_check(
 
                 st.metric(
                     "Market average",
-                    f'€{result["average"]:.2f}',
+                    f'€{group["average"]:.2f}',
                 )
 
             with c2:
 
                 st.metric(
                     "Lowest",
-                    f'€{result["min"]:.2f}',
+                    f'€{group["min"]:.2f}',
                 )
 
             with c3:
 
                 st.metric(
                     "Highest",
-                    f'€{result["max"]:.2f}',
+                    f'€{group["max"]:.2f}',
                 )
 
             with c4:
 
                 st.metric(
-                    "Shops",
-                    result["count"],
+                    "Shops / offers",
+                    f'{group["shops"]} / {group["offers"]}',
                 )
 
-            if (
-                selected_item is not None
-                and normalize_unit(
-                    selected_item["unit"]
-                )
-                == unit
-            ):
-
-                list_price = float(
-                    selected_item["price"]
-                )
+            if list_price is not None:
 
                 difference = (
-                    (list_price - result["average"])
-                    / result["average"]
+                    (list_price - group["average"])
+                    / group["average"]
                     * 100
                 )
 
@@ -590,11 +625,69 @@ def show_market_check(
                     f'price is used in the estimate.'
                 )
 
+        else:
+
+            st.warning(
+                "Different thicknesses were found and "
+                "the drawing does not say which one is "
+                "needed, so prices are shown separately "
+                "for each thickness."
+            )
+
+            group_rows = []
+
+            for group in groups:
+
+                row = {
+                    "Thickness": group["label"],
+                    f"Average € / {unit}": group["average"],
+                    "Lowest": group["min"],
+                    "Highest": group["max"],
+                    "Shops / offers": (
+                        f'{group["shops"]} / {group["offers"]}'
+                    ),
+                }
+
+                if list_price is not None:
+
+                    difference = (
+                        (list_price - group["average"])
+                        / group["average"]
+                        * 100
+                    )
+
+                    row["Price list vs market"] = (
+                        f'{abs(difference):.0f}% '
+                        f'{"above" if difference > 0 else "below"}'
+                    )
+
+                group_rows.append(row)
+
+            st.dataframe(
+                group_rows,
+                hide_index=True,
+            )
+
+            if list_price is not None:
+
+                st.caption(
+                    f'Price list: €{list_price:.2f}/{unit}. '
+                    f'The price-list price is used in '
+                    f'the estimate.'
+                )
+
+        if result["offers"]:
+
             st.dataframe(
                 [
                     {
                         "Shop": offer["shop"],
                         "Product": offer["product_name"],
+                        "Thickness": (
+                            f'{offer["thickness"]:g} mm'
+                            if offer.get("thickness")
+                            else "-"
+                        ),
                         "Shop price": (
                             f'€{offer["price"]:.2f} / '
                             f'{offer["price_unit"]}'
@@ -642,9 +735,33 @@ def show_market_check(
 
         if (
             selected_item is not None
-            or not result["count"]
+            or not groups
         ):
             return None
+
+        group = groups[0]
+
+        if len(groups) > 1:
+
+            group_labels = [
+                candidate["label"]
+                for candidate in groups
+            ]
+
+            chosen_label = st.selectbox(
+                "Thickness to use",
+                group_labels,
+                key=(
+                    f"market_thickness_"
+                    f"{part_index}"
+                ),
+            )
+
+            group = groups[
+                group_labels.index(
+                    chosen_label
+                )
+            ]
 
         category_options = sorted(
             set(
@@ -682,7 +799,7 @@ def show_market_check(
         if not st.toggle(
             (
                 f'Use market price '
-                f'€{result["average"]:.2f}/{unit} '
+                f'€{group["average"]:.2f}/{unit} '
                 f'in the estimate'
             ),
             key=(
@@ -692,14 +809,20 @@ def show_market_check(
         ):
             return None
 
+        thickness_name = (
+            f', {group["label"]}'
+            if group["thickness"]
+            else ""
+        )
+
         return {
             "name": (
                 f'{ai_part.get("name")} '
-                f'(market price)'
+                f'(market price{thickness_name})'
             ),
             "category": category,
             "unit": unit,
-            "price": result["average"],
+            "price": group["average"],
             "market": True,
         }
 

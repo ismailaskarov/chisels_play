@@ -1,4 +1,5 @@
 import json
+import re
 from statistics import mean
 from urllib.parse import urlparse
 
@@ -14,26 +15,32 @@ client = OpenAI()
 
 LT_VAT_RATE = 0.21
 
+THICKNESS_TOLERANCE_MM = 0.5
+
 MARKET_SEARCH_INSTRUCTIONS = """
 You research current market prices in Lithuania for a furniture manufacturer.
 
 Use web search to find the given furniture component (board, glass, hardware,
-LED, etc.) in Lithuanian online shops and suppliers (websites ending in .lt).
+LED, etc.) in shops and suppliers that sell in Lithuania. Prefer Lithuanian
+companies; their websites often end in .lt but may also use .com, .eu etc.
 
 Rules:
 1. Only report prices you actually saw on a product page during this search.
    Never estimate, round or invent a price.
 2. url must be the exact product page where the price is shown.
 3. Only include the same product or a closely similar one (same material,
-   same type, similar thickness/size). Set match to "exact" or "similar".
-4. price_unit is the unit the shop sells in: "m2", "m", "pcs", "set",
+   same type). Set match to "exact" or "similar".
+4. If the part has a thickness, only include products with that thickness.
+   If it has no thickness, include the common thicknesses you find.
+5. thickness_mm is the product's thickness in mm if stated, otherwise null.
+6. price_unit is the unit the price is for: "m2", "m", "pcs", "set",
    "sheet" (a whole board/glass sheet) or "other".
-5. For "sheet" prices, give the sheet length and width in mm if shown,
-   otherwise null.
-6. includes_vat: Lithuanian shops usually show prices with 21% PVM for
-   private customers. Set it to true unless the page says the price is
-   without PVM.
-7. Return at most 6 offers, preferring different shops.
+7. For "sheet" prices, and for "pcs" prices of a fixed-size panel or glass
+   piece, give item_length_mm and item_width_mm if shown, otherwise null.
+8. includes_vat: shops for private customers usually show prices with 21%
+   PVM. Set it to true unless the page says the price is without PVM.
+9. Return at most 8 offers, preferring different shops.
+10. Write notes in English.
 """
 
 OFFER_SCHEMA = {
@@ -52,8 +59,9 @@ OFFER_SCHEMA = {
                         "type": "string",
                         "enum": ["m2", "m", "pcs", "set", "sheet", "other"],
                     },
-                    "sheet_length_mm": {"type": ["number", "null"]},
-                    "sheet_width_mm": {"type": ["number", "null"]},
+                    "thickness_mm": {"type": ["number", "null"]},
+                    "item_length_mm": {"type": ["number", "null"]},
+                    "item_width_mm": {"type": ["number", "null"]},
                     "includes_vat": {"type": "boolean"},
                     "match": {"type": "string", "enum": ["exact", "similar"]},
                 },
@@ -63,8 +71,9 @@ OFFER_SCHEMA = {
                     "product_name",
                     "price",
                     "price_unit",
-                    "sheet_length_mm",
-                    "sheet_width_mm",
+                    "thickness_mm",
+                    "item_length_mm",
+                    "item_width_mm",
                     "includes_vat",
                     "match",
                 ],
@@ -87,6 +96,31 @@ def target_unit_for(ai_part, price_item=None):
     if "m" in expected:
         return "m"
     return "pcs"
+
+
+def thickness_from_text(text):
+    found = re.search(r"(\d+(?:[.,]\d+)?)\s*mm\b", str(text or "").lower())
+    if not found:
+        return None
+    return float(found.group(1).replace(",", "."))
+
+
+def target_thickness_for(ai_part, price_item=None):
+    thickness = safe_float(ai_part.get("thickness_mm"))
+    if thickness:
+        return thickness, "drawing"
+    if price_item is not None:
+        thickness = thickness_from_text(price_item.get("name"))
+        if thickness:
+            return thickness, "price list"
+    return None, ""
+
+
+def offer_thickness(offer):
+    thickness = safe_float(offer.get("thickness_mm"))
+    if thickness:
+        return thickness
+    return thickness_from_text(offer.get("product_name"))
 
 
 def domain_of(url):
@@ -120,35 +154,57 @@ def offer_price_per_unit(offer, target_unit):
 
     offer_unit = normalize_unit(offer.get("price_unit"))
 
-    if offer_unit == "sheet":
-        if target_unit != "m2":
-            return None, "sold per sheet"
-        length = safe_float(offer.get("sheet_length_mm"))
-        width = safe_float(offer.get("sheet_width_mm"))
-        if not length or not width:
-            return None, "sheet size unknown"
-        return price / ((length / 1000) * (width / 1000)), ""
-
     if offer_unit == target_unit or {offer_unit, target_unit} <= {"pcs", "set"}:
         return price, ""
+
+    if target_unit == "m2" and offer_unit in ("sheet", "pcs"):
+        length = safe_float(offer.get("item_length_mm"))
+        width = safe_float(offer.get("item_width_mm"))
+        if not length or not width:
+            return None, f"priced per {offer.get('price_unit')}, size unknown"
+        return price / ((length / 1000) * (width / 1000)), ""
 
     return None, f"priced per {offer.get('price_unit')}"
 
 
-def summarize_offers(offers, target_unit, allowed_domains=None):
+def summarize_group(offers, thickness):
+    prices = [offer["price_excl_vat_per_unit"] for offer in offers]
+    return {
+        "thickness": thickness,
+        "label": f"{thickness:g} mm" if thickness else "thickness not stated",
+        "average": round(mean(prices), 2),
+        "min": min(prices),
+        "max": max(prices),
+        "offers": len(offers),
+        "shops": len({domain_of(offer.get("url")) for offer in offers}),
+    }
+
+
+def summarize_offers(offers, target_unit, allowed_domains=None, target_thickness=None):
     used = []
     skipped = []
 
     for offer in offers:
-        domain = domain_of(offer.get("url"))
-        if not str(offer.get("url") or "").startswith(("http://", "https://")):
+        url = str(offer.get("url") or "")
+        domain = domain_of(url)
+        if not url.startswith(("http://", "https://")):
             skipped.append((offer, "no link"))
             continue
-        if not domain.endswith(".lt"):
+        if allowed_domains:
+            if domain not in allowed_domains:
+                skipped.append((offer, "not found in the web search"))
+                continue
+        elif not domain.endswith(".lt"):
             skipped.append((offer, "not a Lithuanian site"))
             continue
-        if allowed_domains and domain not in allowed_domains:
-            skipped.append((offer, "not found in the web search"))
+
+        thickness = offer_thickness(offer) if target_unit == "m2" else None
+        if (
+            target_thickness
+            and thickness
+            and abs(thickness - target_thickness) > THICKNESS_TOLERANCE_MM
+        ):
+            skipped.append((offer, f"different thickness ({thickness:g} mm)"))
             continue
 
         unit_price, problem = offer_price_per_unit(offer, target_unit)
@@ -156,30 +212,50 @@ def summarize_offers(offers, target_unit, allowed_domains=None):
             skipped.append((offer, problem))
             continue
 
-        used.append({**offer, "price_excl_vat_per_unit": round(unit_price, 2)})
+        used.append({
+            **offer,
+            "thickness": thickness,
+            "price_excl_vat_per_unit": round(unit_price, 2),
+        })
 
-    prices = [offer["price_excl_vat_per_unit"] for offer in used]
+    grouped = {}
+    for offer in used:
+        key = None if target_thickness else offer["thickness"]
+        grouped.setdefault(key, []).append(offer)
+
+    groups = sorted(
+        (summarize_group(group_offers, target_thickness or key) for key, group_offers in grouped.items()),
+        key=lambda group: (group["thickness"] is None, group["thickness"] or 0),
+    )
+
+    single = groups[0] if len(groups) == 1 else None
 
     return {
         "unit": target_unit,
+        "target_thickness": target_thickness,
         "offers": used,
         "skipped": [{**offer, "skip_reason": reason} for offer, reason in skipped],
-        "average": round(mean(prices), 2) if prices else None,
-        "min": min(prices) if prices else None,
-        "max": max(prices) if prices else None,
-        "count": len(prices),
+        "groups": groups,
+        "average": single["average"] if single else None,
+        "min": single["min"] if single else None,
+        "max": single["max"] if single else None,
+        "count": len(used),
+        "shops": len({domain_of(offer.get("url")) for offer in used}),
     }
 
 
 def search_market_prices(ai_part, price_item=None):
     target_unit = target_unit_for(ai_part, price_item)
+    target_thickness, thickness_source = (
+        target_thickness_for(ai_part, price_item) if target_unit == "m2" else (None, "")
+    )
 
     request = {
         "part": {
             "name": ai_part.get("name"),
             "component_type": ai_part.get("component_type"),
             "material": ai_part.get("material"),
-            "thickness_mm": ai_part.get("thickness_mm"),
+            "thickness_mm": target_thickness,
             "length_mm": ai_part.get("length_mm"),
             "width_mm": ai_part.get("width_mm"),
         },
@@ -229,11 +305,13 @@ def search_market_prices(ai_part, price_item=None):
         result.get("offers", []),
         target_unit,
         allowed_domains=searched_domains(response),
+        target_thickness=target_thickness,
     )
+    summary["thickness_source"] = thickness_source
     summary["notes"] = result.get("notes", "")
 
     print(
-        "Market prices:", summary["count"], "usable offers,",
-        len(summary["skipped"]), "skipped, average", summary["average"],
+        "Market prices:", summary["count"], "usable offers from", summary["shops"], "shops,",
+        len(summary["skipped"]), "skipped,", len(summary["groups"]), "thickness groups",
     )
     return summary
