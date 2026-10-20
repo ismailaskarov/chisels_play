@@ -52,6 +52,18 @@ FURNITURE_SCHEMA = {
             "type": ["integer", "null"]
         },
 
+        "hinged_doors": {
+            "type": ["integer", "null"]
+        },
+
+        "sliding_doors": {
+            "type": ["integer", "null"]
+        },
+
+        "door_height_mm": {
+            "type": ["number", "null"]
+        },
+
         "shelves": {
             "type": ["integer", "null"]
         },
@@ -169,6 +181,9 @@ FURNITURE_SCHEMA = {
         "height_mm",
         "depth_mm",
         "doors",
+        "hinged_doors",
+        "sliding_doors",
+        "door_height_mm",
         "shelves",
         "notes",
         "materials",
@@ -305,7 +320,190 @@ CRITICAL RULES:
 
 22. The output will later be matched to a real price catalog and priced
     deterministically by Python.
+
+23. Detect the door opening system whenever the drawing provides enough
+    information.
+
+    - "doors" = total number of furniture doors that can be reliably identified.
+    - "hinged_doors" = number of doors that clearly use normal furniture hinges.
+    - "sliding_doors" = number of doors that clearly use a sliding system.
+    - Sliding doors must NEVER be counted as hinged doors.
+    - If the drawing shows doors but does not make the opening system clear,
+      set hinged_doors and sliding_doors to null.
+    - Never assume that every wardrobe door is hinged.
+    - Do not count drawer fronts as doors.
+
+24. "door_height_mm" is the actual height of the hinged door leaf when this
+    can be reliably determined.
+
+    - Do NOT automatically copy the overall furniture height.
+    - Only use the furniture height when the drawing clearly shows that it is
+      also the actual door height.
+    - If several hinged doors have significantly different heights and one
+      representative height cannot be used safely, return null and describe
+      the different heights in "uncertain".
+
+25. If hinges are explicitly listed in the BOM or drawing, extract them as a
+    normal hardware part.
+
+    - Preserve an explicit hinge brand/model when visible.
+    - Preserve the explicit hinge quantity.
+    - Do NOT create an additional generic hinge row when the drawing already
+      explicitly specifies the hinges.
+
+26. Hinges that are not explicitly listed may later be derived automatically
+    by Python from confirmed hinged doors. Therefore do not invent a hinge
+    quantity yourself.
 """
+
+
+# --------------------------------------------------
+# DERIVED HARDWARE
+# --------------------------------------------------
+
+def hinges_per_door(height_mm):
+    """Return the hinge quantity for one hinged door."""
+
+    if height_mm is None:
+        return None
+
+    try:
+        height_mm = float(height_mm)
+    except (TypeError, ValueError):
+        return None
+
+    if height_mm <= 0:
+        return None
+
+    if height_mm <= 900:
+        return 2
+
+    if height_mm <= 1600:
+        return 3
+
+    if height_mm <= 2100:
+        return 4
+
+    return 5
+
+
+def explicit_hinges_exist(parts):
+    hinge_words = (
+        "hinge",
+        "hinges",
+        "vyris",
+        "vyriai",
+    )
+
+    for part in parts:
+        component_type = str(
+            part.get("component_type") or ""
+        ).strip().lower()
+
+        combined = (
+            str(part.get("name") or "")
+            + " "
+            + str(part.get("material") or "")
+        ).lower()
+
+        if (
+            component_type == "hardware"
+            and any(word in combined for word in hinge_words)
+        ):
+            return True
+
+    return False
+
+
+def add_uncertain_message(ai_result, message):
+    uncertain = ai_result.get("uncertain")
+
+    if not isinstance(uncertain, list):
+        uncertain = []
+
+    if message not in uncertain:
+        uncertain.append(message)
+
+    ai_result["uncertain"] = uncertain
+
+
+def add_derived_hinges(ai_result):
+    """Add a deterministic hinge component for confirmed hinged doors."""
+
+    parts = ai_result.get("parts")
+
+    if not isinstance(parts, list):
+        parts = []
+
+    if explicit_hinges_exist(parts):
+        print(
+            "Explicit hinges found in drawing/BOM. "
+            "No derived hinges added."
+        )
+        return ai_result
+
+    hinged_doors = ai_result.get("hinged_doors")
+
+    try:
+        hinged_doors = int(hinged_doors)
+    except (TypeError, ValueError):
+        hinged_doors = 0
+
+    if hinged_doors <= 0:
+        print(
+            "No confirmed hinged doors. "
+            "No derived hinges added."
+        )
+        return ai_result
+
+    door_height_mm = ai_result.get("door_height_mm")
+    per_door = hinges_per_door(door_height_mm)
+
+    if per_door is None:
+        message = (
+            f"{hinged_doors} hinged door(s) were detected, "
+            "but the door height could not be determined reliably, "
+            "so hinge quantity was not calculated."
+        )
+        add_uncertain_message(ai_result, message)
+        print("HINGES NOT DERIVED:", message)
+        return ai_result
+
+    total_hinges = hinged_doors * per_door
+
+    parts.append({
+        "name": "Furniture hinge",
+        "component_type": "hardware",
+        "material": "Hinge",
+        "quantity": total_hinges,
+        "length_mm": None,
+        "width_mm": None,
+        "height_mm": None,
+        "thickness_mm": None,
+        "source_context": (
+            f"Derived automatically from {hinged_doors} hinged door(s), "
+            f"door height {float(door_height_mm):g} mm, "
+            f"{per_door} hinges per door"
+        ),
+        "confidence": 1.0,
+    })
+
+    ai_result["parts"] = parts
+
+    print(
+        "DERIVED HINGES:",
+        hinged_doors,
+        "doors x",
+        per_door,
+        "hinges =",
+        total_hinges,
+    )
+
+    return ai_result
+
+
+def post_process_result(result):
+    return add_derived_hinges(result)
 
 
 # --------------------------------------------------
@@ -393,6 +591,10 @@ def analyze_pdf(
 
     result = json.loads(
         response.output_text
+    )
+
+    result = post_process_result(
+        result
     )
 
     print(
@@ -505,6 +707,10 @@ def analyze_image(
 
     result = json.loads(
         response.output_text
+    )
+
+    result = post_process_result(
+        result
     )
 
     print(

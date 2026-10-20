@@ -1,5 +1,6 @@
 import csv
 import io
+from datetime import date, timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -24,6 +25,11 @@ from component_matcher import (
     normalize_unit,
 )
 from market_prices import search_market_prices
+from quote_generator import (
+    build_quote_excel,
+    calculate_quote_totals,
+    quote_filename,
+)
 
 
 PRICE_FILE = Path("data") / "prices.xlsx"
@@ -313,6 +319,10 @@ def apply_ai_data(
             or
             str(key).startswith(
                 "market_"
+            )
+            or
+            str(key).startswith(
+                "quote_"
             )
         ):
             keys_to_delete.append(
@@ -1034,6 +1044,10 @@ def clear_product():
             or
             str(key).startswith(
                 "market_"
+            )
+            or
+            str(key).startswith(
+                "quote_"
             )
         ):
             keys_to_delete.append(
@@ -2419,6 +2433,313 @@ if st.session_state[
                 f'€'
                 f'{result["total"]:.2f}'
             ),
+        )
+
+
+    # --------------------------------------------------
+    # CLIENT QUOTATION
+    # --------------------------------------------------
+
+    st.divider()
+
+    st.subheader(
+        "Client quotation"
+    )
+
+    st.caption(
+        "The calculated price stays unchanged internally. "
+        "Set the final client price separately if you want "
+        "to adjust it based on the market or commercial decision."
+    )
+
+    q1, q2, q3 = st.columns(3)
+
+    with q1:
+        quote_number = st.text_input(
+            "Quote number",
+            value=(
+                st.session_state.get(
+                    "quote_number_value"
+                )
+                or f"CP-{date.today():%Y%m%d}"
+            ),
+            key="quote_number_value",
+        )
+
+    with q2:
+        quote_date = st.date_input(
+            "Quote date",
+            value=date.today(),
+            key="quote_date_value",
+        )
+
+    with q3:
+        validity_date = st.date_input(
+            "Validity date",
+            value=date.today() + timedelta(days=30),
+            key="quote_validity_value",
+        )
+
+    q4, q5 = st.columns(2)
+
+    with q4:
+        client_name = st.text_input(
+            "Client name",
+            key="quote_client_name",
+        )
+
+    with q5:
+        quote_product_name = st.text_input(
+            "Product / furniture name",
+            value=(
+                st.session_state.get(
+                    "furniture_name"
+                )
+                or "Furniture"
+            ),
+            key="quote_product_name",
+        )
+
+    price_col1, price_col2, price_col3 = st.columns(3)
+
+    with price_col1:
+        st.metric(
+            "Calculated price",
+            f'€{result["total"]:.2f}',
+        )
+
+    with price_col2:
+        final_client_price = st.number_input(
+            "Final client price (excl. VAT)",
+            min_value=0.0,
+            value=float(
+                result["total"]
+            ),
+            step=50.0,
+            key="quote_final_client_price",
+        )
+
+    with price_col3:
+        price_adjustment = (
+            final_client_price
+            - float(result["total"])
+        )
+
+        st.metric(
+            "Price adjustment",
+            f'€{price_adjustment:+.2f}',
+        )
+
+    st.markdown(
+        "**Additional services**"
+    )
+
+    default_services = [
+        {
+            "Service": "Measurement on site",
+            "Quantity": 1.0,
+            "Price excl. VAT": 0.0,
+        },
+        {
+            "Service": "Delivery",
+            "Quantity": 1.0,
+            "Price excl. VAT": 0.0,
+        },
+        {
+            "Service": "Installation",
+            "Quantity": 1.0,
+            "Price excl. VAT": 0.0,
+        },
+        {
+            "Service": "Other service",
+            "Quantity": 1.0,
+            "Price excl. VAT": 0.0,
+        },
+    ]
+
+    edited_services = st.data_editor(
+        default_services,
+        num_rows="dynamic",
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Service": st.column_config.TextColumn(
+                "Service",
+                required=True,
+            ),
+            "Quantity": st.column_config.NumberColumn(
+                "Quantity",
+                min_value=0.0,
+                step=1.0,
+            ),
+            "Price excl. VAT": st.column_config.NumberColumn(
+                "Price excl. VAT",
+                min_value=0.0,
+                step=10.0,
+                format="€%.2f",
+            ),
+        },
+        key="quote_services_editor",
+    )
+
+    service_rows = []
+
+    if hasattr(edited_services, "to_dict"):
+        edited_service_rows = edited_services.to_dict(
+            orient="records"
+        )
+    else:
+        edited_service_rows = list(
+            edited_services
+        )
+
+    for row in edited_service_rows:
+        service_rows.append({
+            "name": row.get(
+                "Service"
+            ),
+            "quantity": row.get(
+                "Quantity",
+                1.0,
+            ),
+            "price": row.get(
+                "Price excl. VAT",
+                0.0,
+            ),
+        })
+
+    settings1, settings2, settings3 = st.columns(3)
+
+    with settings1:
+        vat_percent = st.number_input(
+            "VAT %",
+            min_value=0.0,
+            value=21.0,
+            step=1.0,
+            key="quote_vat_percent",
+        )
+
+    with settings2:
+        discount_type_label = st.selectbox(
+            "Discount type",
+            [
+                "Amount (€)",
+                "Percent (%)",
+            ],
+            key="quote_discount_type",
+        )
+
+    with settings3:
+        discount_value = st.number_input(
+            "Discount",
+            min_value=0.0,
+            value=0.0,
+            step=10.0,
+            key="quote_discount_value",
+        )
+
+    discount_mode = (
+        "percent"
+        if discount_type_label == "Percent (%)"
+        else "amount"
+    )
+
+    quote_totals = calculate_quote_totals(
+        furniture_price=final_client_price,
+        services=service_rows,
+        vat_percent=vat_percent,
+        discount_value=discount_value,
+        discount_mode=discount_mode,
+    )
+
+    preview1, preview2, preview3, preview4 = st.columns(4)
+
+    with preview1:
+        st.metric(
+            "Before discount",
+            f'€{quote_totals["subtotal_before_discount"]:.2f}',
+        )
+
+    with preview2:
+        st.metric(
+            "Discount",
+            f'€{quote_totals["discount_amount"]:.2f}',
+        )
+
+    with preview3:
+        st.metric(
+            f'VAT {vat_percent:g}%',
+            f'€{quote_totals["vat_amount"]:.2f}',
+        )
+
+    with preview4:
+        st.metric(
+            "CLIENT TOTAL",
+            f'€{quote_totals["total_with_vat"]:.2f}',
+        )
+
+    if st.button(
+        "Generate quotation",
+        type="primary",
+        key="generate_quote_button",
+    ):
+
+        if not str(client_name).strip():
+            st.error(
+                "Enter the client name before generating the quotation."
+            )
+
+        elif not str(quote_number).strip():
+            st.error(
+                "Enter the quote number before generating the quotation."
+            )
+
+        else:
+            st.session_state[
+                "generated_quote_bytes"
+            ] = build_quote_excel(
+                quote_number=quote_number,
+                quote_date=quote_date,
+                validity_date=validity_date,
+                client_name=client_name,
+                furniture_name=quote_product_name,
+                furniture_price=final_client_price,
+                services=service_rows,
+                vat_percent=vat_percent,
+                discount_value=discount_value,
+                discount_mode=discount_mode,
+                logo_path=LOGO_PATH,
+            )
+
+            st.session_state[
+                "generated_quote_filename"
+            ] = quote_filename(
+                quote_number,
+                client_name,
+            )
+
+            st.success(
+                "Quotation generated. Download it below."
+            )
+
+    if st.session_state.get(
+        "generated_quote_bytes"
+    ):
+
+        st.download_button(
+            "Download quotation (.xlsx)",
+            data=st.session_state[
+                "generated_quote_bytes"
+            ],
+            file_name=st.session_state.get(
+                "generated_quote_filename",
+                "quotation.xlsx",
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            key="download_quote_button",
         )
 
 
