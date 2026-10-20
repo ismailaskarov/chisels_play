@@ -26,7 +26,7 @@ from component_matcher import (
 )
 from market_prices import search_market_prices
 from quote_generator import (
-    build_quote_excel,
+    build_quote_pdf,
     calculate_quote_totals,
     quote_filename,
 )
@@ -2536,22 +2536,22 @@ if st.session_state[
 
     default_services = [
         {
-            "Service": "Measurement on site",
+            "Service": "Matavimas",
             "Quantity": 1.0,
             "Price excl. VAT": 0.0,
         },
         {
-            "Service": "Delivery",
+            "Service": "Pristatymas",
             "Quantity": 1.0,
             "Price excl. VAT": 0.0,
         },
         {
-            "Service": "Installation",
+            "Service": "Montavimas",
             "Quantity": 1.0,
             "Price excl. VAT": 0.0,
         },
         {
-            "Service": "Other service",
+            "Service": "Kita paslauga",
             "Quantity": 1.0,
             "Price excl. VAT": 0.0,
         },
@@ -2697,7 +2697,7 @@ if st.session_state[
         else:
             st.session_state[
                 "generated_quote_bytes"
-            ] = build_quote_excel(
+            ] = build_quote_pdf(
                 quote_number=quote_number,
                 quote_date=quote_date,
                 validity_date=validity_date,
@@ -2719,7 +2719,7 @@ if st.session_state[
             )
 
             st.success(
-                "Quotation generated. Download it below."
+                "Quotation PDF generated. Download it below."
             )
 
     if st.session_state.get(
@@ -2727,18 +2727,15 @@ if st.session_state[
     ):
 
         st.download_button(
-            "Download quotation (.xlsx)",
+            "Download quotation (.pdf)",
             data=st.session_state[
                 "generated_quote_bytes"
             ],
             file_name=st.session_state.get(
                 "generated_quote_filename",
-                "quotation.xlsx",
+                "quotation.pdf",
             ),
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
+            mime="application/pdf",
             key="download_quote_button",
         )
 

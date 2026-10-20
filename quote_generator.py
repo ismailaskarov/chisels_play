@@ -1,10 +1,22 @@
 from io import BytesIO
 from pathlib import Path
 
-from openpyxl import Workbook
-from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import (
+    Image,
+    KeepTogether,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 
 DEFAULT_SUPPLIER_NAME = 'IĮ "Buki kaltai"'
@@ -14,6 +26,47 @@ DEFAULT_SUPPLIER_DETAILS = [
     "Šilo g. 6, Lekėčiai, Šakių r.",
     "062533752",
 ]
+
+DEFAULT_NOTES = [
+    "Kainos gali keistis atsisakius vienos ar kitos pozicijos iš pasiūlymo",
+    "Kainos gali keistis keičiant užklausoje pateiktus ir/ar telefonu aptartus duomenis iki pasiūlymo galiojimo pabaigos",
+    "Pristatymo kaštai ir montavimo paslauga neįskaičiuota, nebent pasiūlyme nurodyta kitaip",
+]
+
+PINK_HEADER = colors.HexColor("#E8CCD8")
+BLACK = colors.HexColor("#111111")
+
+
+def _register_fonts():
+    """Register a Unicode serif font if one is available."""
+    candidates = [
+        (
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+        ),
+        (
+            "/usr/share/fonts/truetype/liberation2/LiberationSerif-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation2/LiberationSerif-Bold.ttf",
+        ),
+        (
+            r"C:\Windows\Fonts\times.ttf",
+            r"C:\Windows\Fonts\timesbd.ttf",
+        ),
+    ]
+
+    for regular, bold in candidates:
+        if Path(regular).exists() and Path(bold).exists():
+            try:
+                pdfmetrics.registerFont(TTFont("QuoteSerif", regular))
+                pdfmetrics.registerFont(TTFont("QuoteSerif-Bold", bold))
+                return "QuoteSerif", "QuoteSerif-Bold"
+            except Exception:
+                pass
+
+    return "Times-Roman", "Times-Bold"
+
+
+FONT_REGULAR, FONT_BOLD = _register_fonts()
 
 
 def safe_number(value, default=0.0):
@@ -31,6 +84,16 @@ def sanitize_filename(value):
     )
     cleaned = cleaned.strip("_")
     return cleaned or "quote"
+
+
+def format_date(value):
+    if hasattr(value, "strftime"):
+        return value.strftime("%d/%m/%Y")
+    return str(value or "")
+
+
+def money(value, decimals=2):
+    return f"{safe_number(value):,.{decimals}f}"
 
 
 def calculate_quote_totals(
@@ -65,11 +128,22 @@ def calculate_quote_totals(
     discount_value = max(0.0, safe_number(discount_value))
 
     if discount_mode == "percent":
-        discount_amount = subtotal_before_discount * min(discount_value, 100.0) / 100.0
+        discount_amount = (
+            subtotal_before_discount
+            * min(discount_value, 100.0)
+            / 100.0
+        )
     else:
-        discount_amount = min(discount_value, subtotal_before_discount)
+        discount_amount = min(
+            discount_value,
+            subtotal_before_discount,
+        )
 
-    subtotal_after_discount = max(0.0, subtotal_before_discount - discount_amount)
+    subtotal_after_discount = max(
+        0.0,
+        subtotal_before_discount - discount_amount,
+    )
+
     vat_percent = max(0.0, safe_number(vat_percent))
     vat_amount = subtotal_after_discount * vat_percent / 100.0
     total_with_vat = subtotal_after_discount + vat_amount
@@ -86,7 +160,22 @@ def calculate_quote_totals(
     }
 
 
-def build_quote_excel(
+def _logo_flowable(logo_path):
+    logo_file = Path(logo_path) if logo_path else None
+    if not logo_file or not logo_file.exists():
+        return Spacer(1, 16 * mm)
+
+    try:
+        image = Image(str(logo_file))
+        image._restrictSize(34 * mm, 16 * mm)
+        image.hAlign = "LEFT"
+        return image
+    except Exception as error:
+        print("Could not add quote logo:", error)
+        return Spacer(1, 16 * mm)
+
+
+def build_quote_pdf(
     quote_number,
     quote_date,
     validity_date,
@@ -102,6 +191,8 @@ def build_quote_excel(
     notes=None,
     logo_path=Path("data") / "logo.jpg",
 ):
+    """Build the final client quotation as a PDF."""
+
     totals = calculate_quote_totals(
         furniture_price=furniture_price,
         services=services,
@@ -110,212 +201,279 @@ def build_quote_excel(
         discount_mode=discount_mode,
     )
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Komerciinis pasiulymas"
-    ws.sheet_view.showGridLines = False
+    supplier_details = (
+        list(supplier_details)
+        if supplier_details is not None
+        else list(DEFAULT_SUPPLIER_DETAILS)
+    )
+    note_lines = list(notes) if notes is not None else list(DEFAULT_NOTES)
 
-    # Page/layout
-    ws.page_setup.orientation = "portrait"
-    ws.page_setup.fitToWidth = 1
-    ws.page_setup.fitToHeight = 0
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.freeze_panes = "A15"
-    ws.print_area = "A1:G40"
-    ws.sheet_properties.pageSetUpPr.fitToPage = True
-    ws.page_margins.left = 0.25
-    ws.page_margins.right = 0.25
-    ws.page_margins.top = 0.35
-    ws.page_margins.bottom = 0.35
+    output = BytesIO()
 
-    widths = {
-        "A": 6,
-        "B": 31,
-        "C": 14,
-        "D": 10,
-        "E": 16,
-        "F": 14,
-        "G": 20,
-    }
-    for column, width in widths.items():
-        ws.column_dimensions[column].width = width
+    doc = SimpleDocTemplate(
+        output,
+        pagesize=A4,
+        leftMargin=8 * mm,
+        rightMargin=8 * mm,
+        topMargin=8 * mm,
+        bottomMargin=9 * mm,
+        title="KOMERCINIS PASIŪLYMAS",
+        author="Chisels Play",
+    )
 
-    title_font = Font(name="Times New Roman", size=16, bold=True)
-    header_font = Font(name="Times New Roman", size=10, bold=True)
-    normal_font = Font(name="Times New Roman", size=10)
-    total_font = Font(name="Times New Roman", size=11, bold=True)
-    thin = Side(style="thin", color="000000")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    header_fill = PatternFill("solid", fgColor="EAD5DF")
+    styles = getSampleStyleSheet()
 
-    # Logo + title
-    ws.row_dimensions[1].height = 18
-    ws.row_dimensions[2].height = 30
-    ws.row_dimensions[3].height = 18
+    title_style = ParagraphStyle(
+        "QuoteTitle",
+        parent=styles["Normal"],
+        fontName=FONT_BOLD,
+        fontSize=17,
+        leading=19,
+        alignment=TA_CENTER,
+        textColor=BLACK,
+        spaceAfter=0,
+    )
 
-    logo_file = Path(logo_path) if logo_path else None
-    if logo_file and logo_file.exists():
-        try:
-            logo = XLImage(str(logo_file))
-            # Keep the image compact so the quote still prints cleanly on one page.
-            max_width = 150
-            max_height = 65
-            scale = min(
-                max_width / float(logo.width or max_width),
-                max_height / float(logo.height or max_height),
-                1.0,
-            )
-            logo.width = int(logo.width * scale)
-            logo.height = int(logo.height * scale)
-            ws.add_image(logo, "A1")
-        except Exception as error:
-            print("Could not add quote logo:", error)
+    normal = ParagraphStyle(
+        "QuoteNormal",
+        parent=styles["Normal"],
+        fontName=FONT_REGULAR,
+        fontSize=8.6,
+        leading=10.4,
+        textColor=BLACK,
+    )
 
-    ws.merge_cells("C2:G2")
-    ws["C2"] = "KOMERCINIS PASIŪLYMAS"
-    ws["C2"].font = title_font
-    ws["C2"].alignment = Alignment(horizontal="center", vertical="center")
+    bold = ParagraphStyle(
+        "QuoteBold",
+        parent=normal,
+        fontName=FONT_BOLD,
+    )
 
-    # Quote metadata
-    metadata = [
-        ("Numeris", quote_number),
-        ("Data", quote_date),
-        ("Galiojimo data", validity_date),
+    small = ParagraphStyle(
+        "QuoteSmall",
+        parent=normal,
+        fontSize=7.4,
+        leading=8.5,
+    )
+
+    right = ParagraphStyle(
+        "QuoteRight",
+        parent=normal,
+        alignment=TA_RIGHT,
+    )
+
+    right_bold = ParagraphStyle(
+        "QuoteRightBold",
+        parent=right,
+        fontName=FONT_BOLD,
+    )
+
+    story = []
+
+    # --------------------------------------------------
+    # HEADER: logo aligned with the title block
+    # --------------------------------------------------
+    logo = _logo_flowable(logo_path)
+    title = Paragraph("KOMERCINIS PASIŪLYMAS", title_style)
+
+    header = Table(
+        [[logo, title, ""]],
+        colWidths=[42 * mm, 110 * mm, 42 * mm],
+        rowHeights=[18 * mm],
+    )
+    header.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (0, 0), "LEFT"),
+        ("ALIGN", (1, 0), (1, 0), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(header)
+    story.append(Spacer(1, 1.5 * mm))
+
+    # Metadata directly below title, compact like the source quote.
+    metadata = Table(
+        [
+            [Paragraph("Numeris", bold), Paragraph(str(quote_number or ""), normal)],
+            [Paragraph("Data", bold), Paragraph(format_date(quote_date), normal)],
+            [Paragraph("Galiojimo data", bold), Paragraph(format_date(validity_date), normal)],
+        ],
+        colWidths=[32 * mm, 44 * mm],
+        hAlign="CENTER",
+    )
+    metadata.setStyle(TableStyle([
+        ("ALIGN", (0, 0), (0, -1), "RIGHT"),
+        ("ALIGN", (1, 0), (1, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 0.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0.5),
+    ]))
+    story.append(metadata)
+    story.append(Spacer(1, 6 * mm))
+
+    supplier_lines = [
+        Paragraph("<u>Tiekėjas</u>", bold),
+        Paragraph(str(supplier_name), normal),
     ]
-    start_row = 5
-    for offset, (label, value) in enumerate(metadata):
-        row = start_row + offset
-        ws[f"B{row}"] = label
-        ws[f"B{row}"].font = header_font
-        ws[f"C{row}"] = value
-        ws[f"C{row}"].font = normal_font
-        if hasattr(value, "strftime"):
-            ws[f"C{row}"].number_format = "dd/mm/yyyy"
+    supplier_lines.extend(
+        Paragraph(str(detail), normal)
+        for detail in supplier_details
+        if str(detail).strip()
+    )
 
-    # Supplier/customer blocks
-    ws["B9"] = "Tiekėjas"
-    ws["B9"].font = header_font
-    ws["B10"] = supplier_name
-    ws["B10"].font = normal_font
-
-    supplier_details = supplier_details or []
-    for index, detail in enumerate(supplier_details[:4], start=11):
-        ws[f"B{index}"] = str(detail)
-        ws[f"B{index}"].font = normal_font
-
-    ws["E9"] = "Užsakovas"
-    ws["E9"].font = header_font
-    ws["E10"] = client_name
-    ws["E10"].font = normal_font
-
-    # Table
-    table_row = 15
-    headers = [
-        "Nr.",
-        "Produktas/paslauga",
-        "Kaina",
-        "Kiekis",
-        "Kaina už visus",
-        "PVM",
-        "Kaina su mokesčiais",
+    client_lines = [
+        Paragraph("<u>Užsakovas</u>", bold),
+        Paragraph(str(client_name or ""), normal),
     ]
 
-    for col, header in enumerate(headers, start=1):
-        cell = ws.cell(row=table_row, column=col, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.border = border
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    supplier_block = Table(
+        [[supplier_lines, client_lines]],
+        colWidths=[98 * mm, 96 * mm],
+    )
+    supplier_block.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    story.append(supplier_block)
+    story.append(Spacer(1, 6 * mm))
 
+    # --------------------------------------------------
+    # PRICE TABLE
+    # --------------------------------------------------
     rows = [{
-        "name": str(furniture_name or "Furniture"),
+        "name": str(furniture_name or "Baldai"),
         "price": totals["furniture_price"],
         "quantity": 1.0,
         "total": totals["furniture_price"],
     }]
     rows.extend(totals["services"])
 
-    current_row = table_row + 1
-    for number, item in enumerate(rows, start=1):
+    table_data = [[
+        Paragraph("Nr.", bold),
+        Paragraph("Produktas/paslauga", bold),
+        Paragraph("Kaina", bold),
+        Paragraph("Kiekis", bold),
+        Paragraph("Kaina už visus", bold),
+        Paragraph("PVM", bold),
+        Paragraph("Kaina su<br/>mokesčiais", bold),
+    ]]
+
+    for index, item in enumerate(rows, start=1):
         line_total = safe_number(item.get("total"))
         line_vat = line_total * totals["vat_percent"] / 100.0
         line_gross = line_total + line_vat
 
-        values = [
-            number,
-            item.get("name"),
-            safe_number(item.get("price")),
-            safe_number(item.get("quantity"), 1.0),
-            line_total,
-            line_vat,
-            line_gross,
-        ]
+        table_data.append([
+            str(index),
+            Paragraph(str(item.get("name") or ""), normal),
+            money(item.get("price"), 1),
+            f'{safe_number(item.get("quantity"), 1.0):g}',
+            money(line_total, 2),
+            money(line_vat, 2),
+            money(line_gross, 2),
+        ])
 
-        for col, value in enumerate(values, start=1):
-            cell = ws.cell(row=current_row, column=col, value=value)
-            cell.font = normal_font
-            cell.border = border
-            cell.alignment = Alignment(
-                horizontal="center" if col != 2 else "left",
-                vertical="center",
-                wrap_text=True,
-            )
-            if col in (3, 5, 6, 7):
-                cell.number_format = '#,##0.00 "€"'
-            elif col == 4:
-                cell.number_format = "0.##"
+    price_table = Table(
+        table_data,
+        repeatRows=1,
+        colWidths=[10 * mm, 65 * mm, 24 * mm, 15 * mm, 30 * mm, 22 * mm, 30 * mm],
+        hAlign="CENTER",
+    )
 
-        current_row += 1
+    price_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), PINK_HEADER),
+        ("TEXTCOLOR", (0, 0), (-1, -1), BLACK),
+        ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
+        ("FONTNAME", (0, 1), (-1, -1), FONT_REGULAR),
+        ("FONTSIZE", (0, 0), (-1, 0), 8.3),
+        ("FONTSIZE", (0, 1), (-1, -1), 8.3),
+        ("LEADING", (0, 0), (-1, -1), 9.4),
+        ("GRID", (0, 0), (-1, -1), 0.55, colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("ALIGN", (1, 1), (1, -1), "CENTER"),
+        ("TOPPADDING", (0, 0), (-1, 0), 4.3),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 4.3),
+        ("TOPPADDING", (0, 1), (-1, -1), 3.5),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 3.5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2.5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2.5),
+    ]))
+    story.append(price_table)
+    story.append(Spacer(1, 5 * mm))
 
-    # Summary
-    summary_row = current_row + 1
-    summary = [
-        ("Kaina", totals["subtotal_before_discount"]),
+    # --------------------------------------------------
+    # TOTALS - right aligned to the table's right edge
+    # --------------------------------------------------
+    summary_data = [
+        [Paragraph("Kaina", right_bold), Paragraph(f'€{money(totals["subtotal_before_discount"], 2)}', right)],
     ]
 
     if totals["discount_amount"] > 0:
-        summary.append(("Nuolaida", -totals["discount_amount"]))
+        summary_data.append([
+            Paragraph("Nuolaida", right_bold),
+            Paragraph(f'-€{money(totals["discount_amount"], 2)}', right),
+        ])
 
-    summary.extend([
-        (f'PVM {totals["vat_percent"]:g}%', totals["vat_amount"]),
-        ("Viso", totals["total_with_vat"]),
+    summary_data.extend([
+        [
+            Paragraph("PVM", right_bold),
+            Paragraph(f'€{money(totals["vat_amount"], 2)}', right),
+        ],
+        [
+            Paragraph("Viso", ParagraphStyle(
+                "TotalLabel",
+                parent=right_bold,
+                fontSize=11.5,
+                leading=13,
+            )),
+            Paragraph(f'€{money(totals["total_with_vat"], 2)}', ParagraphStyle(
+                "TotalValue",
+                parent=right,
+                fontName=FONT_BOLD,
+                fontSize=11.5,
+                leading=13,
+            )),
+        ],
     ])
 
-    for index, (label, value) in enumerate(summary):
-        row = summary_row + index
-        ws.merge_cells(start_row=row, start_column=5, end_row=row, end_column=6)
-        label_cell = ws.cell(row=row, column=5, value=label)
-        value_cell = ws.cell(row=row, column=7, value=value)
-        label_cell.alignment = Alignment(horizontal="right")
-        value_cell.alignment = Alignment(horizontal="right")
-        value_cell.number_format = '#,##0.00 "€"'
-
-        if label == "Viso":
-            label_cell.font = total_font
-            value_cell.font = total_font
-            label_cell.border = Border(top=thin)
-            value_cell.border = Border(top=thin)
-        else:
-            label_cell.font = header_font
-            value_cell.font = header_font
-
-    # Notes
-    note_row = summary_row + len(summary) + 3
-    default_notes = [
-        "Kainos gali keistis pasikeitus žaliavų ar paslaugų kainoms.",
-        "Pasiūlymas galioja iki nurodytos galiojimo datos.",
+    summary = Table(
+        summary_data,
+        colWidths=[32 * mm, 32 * mm],
+        hAlign="RIGHT",
+    )
+    summary_style = [
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 1.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+        ("LINEABOVE", (0, -1), (-1, -1), 0.7, colors.black),
     ]
-    note_lines = notes if notes is not None else default_notes
+    summary.setStyle(TableStyle(summary_style))
+    story.append(summary)
+    story.append(Spacer(1, 8 * mm))
 
+    # --------------------------------------------------
+    # FOOTER CONDITIONS
+    # --------------------------------------------------
+    note_flowables = []
     for note in note_lines:
-        ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=7)
-        cell = ws.cell(row=note_row, column=1, value=f"• {note}")
-        cell.font = Font(name="Times New Roman", size=9)
-        cell.alignment = Alignment(wrap_text=True)
-        note_row += 1
+        note_flowables.append(
+            Paragraph(f"• {note}", small)
+        )
 
-    output = BytesIO()
-    wb.save(output)
+    story.append(KeepTogether(note_flowables))
+
+    doc.build(story)
     output.seek(0)
     return output.getvalue()
 
@@ -323,4 +481,4 @@ def build_quote_excel(
 def quote_filename(quote_number, client_name):
     quote_part = sanitize_filename(quote_number)
     client_part = sanitize_filename(client_name)
-    return f"{quote_part}_{client_part}.xlsx"
+    return f"{quote_part}_{client_part}.pdf"
