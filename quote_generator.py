@@ -1,5 +1,6 @@
 from io import BytesIO
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
@@ -296,7 +297,7 @@ def build_quote_pdf(
     # Metadata directly below title, compact like the source quote.
     metadata = Table(
         [
-            [Paragraph("Numeris", bold), Paragraph(str(quote_number or ""), normal)],
+            [Paragraph("Numeris", bold), Paragraph(escape(str(quote_number or "")), normal)],
             [Paragraph("Data", bold), Paragraph(format_date(quote_date), normal)],
             [Paragraph("Galiojimo data", bold), Paragraph(format_date(validity_date), normal)],
         ],
@@ -317,17 +318,17 @@ def build_quote_pdf(
 
     supplier_lines = [
         Paragraph("<u>Tiekėjas</u>", bold),
-        Paragraph(str(supplier_name), normal),
+        Paragraph(escape(str(supplier_name)), normal),
     ]
     supplier_lines.extend(
-        Paragraph(str(detail), normal)
+        Paragraph(escape(str(detail)), normal)
         for detail in supplier_details
         if str(detail).strip()
     )
 
     client_lines = [
         Paragraph("<u>Užsakovas</u>", bold),
-        Paragraph(str(client_name or ""), normal),
+        Paragraph(escape(str(client_name or "")), normal),
     ]
 
     supplier_block = Table(
@@ -372,7 +373,7 @@ def build_quote_pdf(
 
         table_data.append([
             str(index),
-            Paragraph(str(item.get("name") or ""), normal),
+            Paragraph(escape(str(item.get("name") or "")), normal),
             money(item.get("price"), 1),
             f'{safe_number(item.get("quantity"), 1.0):g}',
             money(line_total, 2),
@@ -468,7 +469,7 @@ def build_quote_pdf(
     note_flowables = []
     for note in note_lines:
         note_flowables.append(
-            Paragraph(f"• {note}", small)
+            Paragraph(f"• {escape(str(note))}", small)
         )
 
     story.append(KeepTogether(note_flowables))

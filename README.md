@@ -122,7 +122,9 @@ It can:
 - flag suspicious/unusual offers;
 - allow a market price to be used for the current estimate when appropriate.
 
-Market results are **never automatically added to the catalog**. For an unmatched component, the estimator can choose a specific real market offer and optionally tick **Add to catalog**. The actual selected offer is saved; the market average is not saved as a catalog product.
+Market results are **never automatically added to the catalog**. For an unmatched component, the estimator can choose a specific real market offer, tick **Add to catalog** for the offers worth keeping, and then click **Save ticked offers to catalog**. Nothing is saved until that button is clicked, so changing the category or other choices beforehand does not create extra catalog items. The actual selected offer is saved; the market average is not saved as a catalog product.
+
+Every **Check market prices** / **Search again** starts with a fresh offers table. Ticks from a previous search are cleared, so a tick can never move to a different offer when the new search returns offers in another order.
 
 ### Better NO MATCH workflow
 
@@ -133,7 +135,9 @@ When no suitable catalog item exists, the UI stays intentionally simple. The est
 
 If neither action is chosen, the part simply remains unresolved and is not included in the estimate. There is no separate Ignore or Leave unresolved button.
 
-For market results, each real offer can be selected for the estimate and can independently be marked **Add to catalog**. The market average remains reference information only.
+For market results, each real offer can be selected for the estimate (**Use**) and can independently be ticked **Add to catalog**; ticked offers are saved with the **Save ticked offers to catalog** button. The market average remains reference information only.
+
+When a new drawing is analysed or **Clear product** is clicked, all NO MATCH choices, custom-item fields and market selections from the previous drawing are cleared, so they can never carry over into a new estimate.
 
 ### Custom items and catalog additions
 
@@ -146,17 +150,31 @@ Fields include:
 - unit;
 - unit price.
 
-A custom item always works in the current estimate. The estimator can optionally tick **Add to catalog for future estimates**.
+A custom item always works in the current estimate. To keep it for future estimates, the estimator clicks **Save to catalog for future estimates**. The item is saved once, with the name, category, unit and price shown at the moment of clicking; typing in the fields does not save anything.
 
-Saved catalog additions are stored in:
+Saved catalog additions are stored:
+
+- in the Supabase table `catalog_items` when `SUPABASE_URL` and `SUPABASE_KEY` are configured (see section 7);
+- otherwise in the local file:
 
 ```text
 data/catalog_additions.json
 ```
 
-The original `data/prices.xlsx` workbook is intentionally not rewritten from the Streamlit UI. On every rerun the application merges approved additions with the base catalog. This reduces the risk of corrupting the pricing workbook and keeps the storage layer easy to replace with Supabase later.
+If Supabase is configured but temporarily unavailable, the item is saved to the local file instead.
 
-> On Streamlit Cloud, local filesystem writes are not durable across redeploys/restarts. For a production/client-facing version, move catalog additions to persistent database storage.
+Duplicate protection compares name, category and unit while ignoring upper/lower case, spacing, punctuation and Lithuanian letters (for example `Lukštas ąžuolo` and `Lukstas azuolo` count as the same item). Saving the same item twice shows **Already in catalog** instead of creating a copy.
+
+The local file is protected against data loss:
+
+- an empty file is treated as "no additions yet";
+- a damaged file is kept as a backup (`catalog_additions.unreadable-<date>.json`) instead of being overwritten;
+- if the file cannot be opened at that moment, saving is refused rather than replacing the existing items;
+- writes go through a temporary file and are safe when several estimators save at the same time.
+
+The original `data/prices.xlsx` workbook is intentionally not rewritten from the Streamlit UI. On every rerun the application merges approved additions with the base catalog. This reduces the risk of corrupting the pricing workbook.
+
+> On Streamlit Cloud, local filesystem writes are not durable across redeploys/restarts. Configure Supabase so catalog additions and learned corrections are kept permanently.
 
 ### Needs Review
 
@@ -271,6 +289,12 @@ LT100012484610
 
 The quotation deliberately contains client-facing prices only. Internal material costs, matching confidence, coefficients and market-search research are not included.
 
+Client names, product names, service names and the quote number are printed exactly as typed, including characters such as `&`, `<` and `>`.
+
+Lithuanian letters (ą, č, ę, ė, į, š, ų, ū, ž) need a Unicode font. The PDF uses DejaVu Serif, Liberation Serif or Times New Roman when one is installed. On Streamlit Cloud, `packages.txt` installs `fonts-dejavu-core` so the font is always available; without it the PDF would fall back to a basic font and show these letters as empty boxes.
+
+The quote PDF is cleared when a new drawing is analysed or **Clear product** is clicked, so a previous client's quotation cannot be downloaded by mistake.
+
 ---
 
 ## 3. Pricing logic
@@ -345,6 +369,7 @@ chisels_play/
 ├── price_reader.py
 ├── quote_generator.py
 ├── requirements.txt
+├── packages.txt             # system packages for Streamlit Cloud (PDF font)
 ├── README.md
 ├── .env                     # local only - never commit
 ├── .gitignore
@@ -377,7 +402,10 @@ Responsible for:
 - learned-correction management UI.
 
 #### `catalog_store.py`
-Stores estimator-approved custom items and selected market offers in `data/catalog_additions.json`, prevents duplicates, and keeps catalog persistence separate from the UI.
+Stores estimator-approved custom items and selected market offers in Supabase (table `catalog_items`) when configured, otherwise in `data/catalog_additions.json`. Prevents duplicates, protects the local file against data loss, and keeps catalog persistence separate from the UI.
+
+#### `packages.txt`
+System packages installed by Streamlit Cloud. Currently `fonts-dejavu-core`, needed for Lithuanian letters in the quotation PDF.
 
 #### `pdf_extractor.py`
 Extracts furniture/component information from uploaded PDFs/images using OpenAI and applies deterministic hinge post-processing.
@@ -458,6 +486,35 @@ __pycache__/
 
 If persistent learned corrections are configured through Supabase, keep those credentials in environment variables/secrets as well rather than source code.
 
+### Persistent storage (Supabase)
+
+Add these to Streamlit secrets (or environment variables):
+
+```text
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your_key
+```
+
+When both are set, learned corrections and catalog additions are stored in Supabase and survive restarts and redeploys. Create the tables once in the Supabase SQL editor:
+
+```sql
+create table if not exists match_feedback (
+    source_key text primary key, source_name text, source_material text,
+    component_type text, catalog_name text, catalog_category text,
+    catalog_unit text, catalog_price double precision, ai_catalog_name text,
+    times_chosen integer default 1, created_at timestamptz, updated_at timestamptz
+);
+
+create table if not exists catalog_items (
+    id text primary key, name text, category text, unit text,
+    price double precision, source text, source_url text, source_type text,
+    thickness_mm double precision, market_match text, active boolean default true,
+    created_at timestamptz, updated_at timestamptz
+);
+```
+
+Catalog rows with `active = false` are ignored by the application.
+
 For Streamlit Cloud, configure secrets in the deployment environment rather than uploading `.env` to GitHub.
 
 ---
@@ -524,7 +581,8 @@ Test all paths:
 
 - select an existing catalog item;
 - check/use a market price;
-- create a custom item and optionally save it to the catalog;
+- create a custom item, change its price/name, then save it to the catalog and confirm only the final values were saved;
+- analyse a new drawing and confirm no custom item or NO MATCH choice carries over from the previous one;
 - ignore a component;
 - intentionally leave a component unresolved.
 
@@ -540,8 +598,10 @@ Confirm warnings do **not** block quotation generation.
 - review offers and units;
 - verify catalog-vs-market comparison;
 - verify a large difference can create a review warning;
-- confirm market data is saved only when the estimator explicitly checks Add to catalog;
-- confirm the selected real offer is saved, not the market average.
+- confirm market data is saved only when the estimator ticks Add to catalog and clicks Save ticked offers to catalog;
+- change the category after ticking and confirm only one item (with the final category) is saved;
+- confirm the selected real offer is saved, not the market average;
+- tick an offer, click Search again, and confirm the tick is cleared rather than moved to another offer.
 
 ### Calculation
 
@@ -562,7 +622,10 @@ Confirm warnings do **not** block quotation generation.
 - verify preview totals;
 - generate PDF;
 - open PDF and visually inspect logo alignment, table, totals and footer;
-- verify the PDF total equals the preview total.
+- verify Lithuanian letters (for example `PASIŪLYMAS`, `Lekėčiai`) display correctly on the deployed app;
+- verify a client name containing `&` prints completely;
+- verify the PDF total equals the preview total;
+- click Clear product and confirm the previous PDF can no longer be downloaded.
 
 ### Warning-only ready-to-quote behavior
 

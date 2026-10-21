@@ -337,6 +337,18 @@ def apply_ai_data(
             str(key).startswith(
                 "quote_"
             )
+            or
+            str(key).startswith(
+                "custom_"
+            )
+            or
+            str(key).startswith(
+                "no_match_resolution_"
+            )
+            or
+            str(key).startswith(
+                "generated_quote_"
+            )
         ):
             keys_to_delete.append(
                 key
@@ -580,6 +592,8 @@ def show_market_check(
             with st.spinner("Searching shops..."):
                 try:
                     result = search_market_prices(ai_part, selected_item)
+                    match["market_search_count"] = match.get("market_search_count", 0) + 1
+                    result["search_id"] = match["market_search_count"]
                     result["searched_for"] = (
                         selected_item["name"]
                         if selected_item is not None
@@ -698,6 +712,11 @@ def show_market_check(
                     )
                 group_rows.append(row)
             st.dataframe(group_rows, hide_index=True, use_container_width=True)
+            if list_price is not None:
+                st.caption(
+                    f'Price list: €{list_price:.2f}/{unit}. '
+                    "The price-list price is used in the estimate."
+                )
 
         if result.get("skipped"):
             st.caption(
@@ -794,7 +813,7 @@ def show_market_check(
                 "Link": st.column_config.LinkColumn("Link"),
                 "_offer_index": None,
             },
-            key=f"market_offer_editor_{part_index}",
+            key=f"market_offer_editor_{part_index}_{result.get('search_id', 0)}",
         )
 
         if hasattr(edited_offers, "to_dict"):
@@ -827,11 +846,13 @@ def show_market_check(
             st.warning("Choose only one market offer to use in the estimate.")
             return None
 
-        # Save every explicitly checked offer. Duplicate protection keeps this safe
-        # across Streamlit reruns.
-        for row in edited_rows:
-            if not row.get("Add to catalog"):
-                continue
+        rows_to_save = [row for row in edited_rows if row.get("Add to catalog")]
+        save_offers = bool(rows_to_save) and st.button(
+            "Save ticked offers to catalog",
+            key=f"market_save_catalog_{part_index}",
+        )
+
+        for row in rows_to_save if save_offers else []:
             offer = offers[int(row["_offer_index"])]
             candidate = {
                 "name": offer.get("product_name") or ai_part.get("name") or "Market item",
@@ -1051,6 +1072,18 @@ def clear_product():
             or
             str(key).startswith(
                 "quote_"
+            )
+            or
+            str(key).startswith(
+                "custom_"
+            )
+            or
+            str(key).startswith(
+                "no_match_resolution_"
+            )
+            or
+            str(key).startswith(
+                "generated_quote_"
             )
         ):
             keys_to_delete.append(
@@ -1709,11 +1742,6 @@ if matches:
                         key=f"custom_price_{part_index}",
                     )
 
-                save_custom = st.checkbox(
-                    "Add to catalog for future estimates",
-                    key=f"custom_add_catalog_{part_index}",
-                )
-
                 if custom_price <= 0:
                     add_review_issue(
                         review_issues,
@@ -1732,7 +1760,10 @@ if matches:
                     "custom": True,
                 }
 
-                if save_custom:
+                if st.button(
+                    "Save to catalog for future estimates",
+                    key=f"custom_save_catalog_{part_index}",
+                ):
                     if catalog_item_exists(all_items, selected_item):
                         st.info(f'Already in catalog: {selected_item["name"]}')
                     else:
