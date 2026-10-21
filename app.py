@@ -24,7 +24,8 @@ from component_matcher import (
     explain_match,
     normalize_unit,
 )
-from market_prices import search_market_prices
+from market_prices import search_market_prices, target_unit_for
+from catalog_store import add_catalog_item, catalog_item_key, load_catalog_additions
 from quote_generator import (
     build_quote_pdf,
     calculate_quote_totals,
@@ -62,11 +63,21 @@ def load_data():
     )
 
 
+@st.cache_data(ttl=300)
+def load_added_items():
+    return load_catalog_additions()
+
+
 price_data = load_data()
 
-all_items = price_data[
-    "items"
-]
+added_items = load_added_items()
+
+all_items = (
+    price_data[
+        "items"
+    ]
+    + added_items
+)
 
 markups = price_data[
     "markups"
@@ -323,6 +334,10 @@ def apply_ai_data(
             or
             str(key).startswith(
                 "quote_"
+            )
+            or
+            str(key).startswith(
+                "additem_"
             )
         ):
             keys_to_delete.append(
@@ -869,6 +884,411 @@ def show_market_check(
         }
 
 
+def market_choices_for_new_item(
+    match,
+    ai_part,
+):
+    result = match.get(
+        "market_result"
+    )
+
+    if not result:
+        return []
+
+    unit = result["unit"]
+
+    base_name = str(
+        ai_part.get("material")
+        or ai_part.get("name")
+        or ""
+    ).strip()
+
+    choices = []
+
+    for group in result["groups"]:
+
+        thickness_name = (
+            f' {group["label"]}'
+            if group["thickness"]
+            else ""
+        )
+
+        group_offers = [
+            offer
+            for offer in result["offers"]
+            if offer.get("in_average")
+            and offer.get("thickness") == group["thickness"]
+        ]
+
+        choices.append({
+            "label": (
+                f'Market average{thickness_name}: '
+                f'€{group["average"]:.2f}/{unit} '
+                f'({group["shops"]} shop(s), '
+                f'{group["offers"]} offer(s))'
+            ),
+            "name": f"{base_name}{thickness_name}".strip(),
+            "price": group["average"],
+            "unit": unit,
+            "url": (
+                group_offers[0]["url"]
+                if group_offers
+                else ""
+            ),
+            "thickness": group["thickness"],
+        })
+
+    for offer in result["offers"]:
+
+        choices.append({
+            "label": (
+                f'{offer["shop"]} — '
+                f'{offer["product_name"]} — '
+                f'€{offer["price_excl_vat_per_unit"]:.2f}/{unit}'
+            ),
+            "name": offer["product_name"],
+            "price": offer["price_excl_vat_per_unit"],
+            "unit": unit,
+            "url": offer["url"],
+            "thickness": offer.get("thickness"),
+        })
+
+    return choices
+
+
+def show_add_item_form(
+    match,
+    ai_part,
+):
+    part_index = match["part_index"]
+
+    with st.expander(
+        "＋ Add price-list item",
+        expanded=False,
+    ):
+
+        choices = market_choices_for_new_item(
+            match,
+            ai_part,
+        )
+
+        sources = ["My own price"]
+
+        if choices:
+            sources.append(
+                "Market price"
+            )
+
+        source = st.radio(
+            "Price source",
+            sources,
+            horizontal=True,
+            key=(
+                f"additem_source_"
+                f"{part_index}"
+            ),
+        )
+
+        if not choices:
+
+            st.caption(
+                "To use a market price, run "
+                "\"Check market prices\" for this "
+                "part first."
+            )
+
+        chosen = None
+
+        choice_id = "own"
+
+        if source == "Market price":
+
+            labels = [
+                choice["label"]
+                for choice in choices
+            ]
+
+            picked_label = st.selectbox(
+                "Market result",
+                labels,
+                key=(
+                    f"additem_market_"
+                    f"{part_index}"
+                ),
+            )
+
+            chosen = choices[
+                labels.index(
+                    picked_label
+                )
+            ]
+
+            choice_id = (
+                f"market{labels.index(picked_label)}"
+            )
+
+        category_options = sorted(
+            set(
+                item["category"]
+                for item in valid_catalog_items
+                if get_markup(
+                    item["category"]
+                )
+                is not None
+            )
+        )
+
+        default_category = (
+            MARKET_CATEGORY_BY_TYPE.get(
+                str(
+                    ai_part.get("component_type")
+                    or ""
+                ).lower()
+            )
+        )
+
+        unit_options = sorted(
+            set(
+                normalize_unit(
+                    item["unit"]
+                )
+                for item in valid_catalog_items
+            )
+        )
+
+        default_unit = (
+            chosen["unit"]
+            if chosen
+            else target_unit_for(
+                ai_part
+            )
+        )
+
+        if default_unit not in unit_options:
+            unit_options.append(
+                default_unit
+            )
+
+        default_name = (
+            chosen["name"]
+            if chosen
+            else str(
+                ai_part.get("material")
+                or ai_part.get("name")
+                or ""
+            ).strip()
+        )
+
+        default_thickness = (
+            chosen["thickness"]
+            if chosen
+            else ai_part.get("thickness_mm")
+        )
+
+        widget_suffix = (
+            f"{part_index}_"
+            f"{choice_id}"
+        )
+
+        with st.form(
+            key=(
+                f"additem_form_"
+                f"{part_index}"
+            ),
+        ):
+
+            name = st.text_input(
+                "Name",
+                value=default_name,
+                key=(
+                    f"additem_name_"
+                    f"{widget_suffix}"
+                ),
+            )
+
+            f1, f2, f3 = st.columns(3)
+
+            with f1:
+
+                category = st.selectbox(
+                    "Category (sets the coefficient)",
+                    category_options,
+                    index=(
+                        category_options.index(
+                            default_category
+                        )
+                        if default_category
+                        in category_options
+                        else 0
+                    ),
+                    key=(
+                        f"additem_category_"
+                        f"{widget_suffix}"
+                    ),
+                )
+
+            with f2:
+
+                unit = st.selectbox(
+                    "Unit",
+                    unit_options,
+                    index=unit_options.index(
+                        default_unit
+                    ),
+                    key=(
+                        f"additem_unit_"
+                        f"{widget_suffix}"
+                    ),
+                )
+
+            with f3:
+
+                price = st.number_input(
+                    "Price excl. VAT (€)",
+                    min_value=0.0,
+                    value=float(
+                        chosen["price"]
+                        if chosen
+                        else 0.0
+                    ),
+                    step=1.0,
+                    format="%.2f",
+                    key=(
+                        f"additem_price_"
+                        f"{widget_suffix}"
+                    ),
+                )
+
+            source_url = st.text_input(
+                "Supplier link (optional)",
+                value=(
+                    chosen["url"]
+                    if chosen
+                    else ""
+                ),
+                key=(
+                    f"additem_url_"
+                    f"{widget_suffix}"
+                ),
+            )
+
+            f4, f5 = st.columns(2)
+
+            with f4:
+
+                thickness = st.number_input(
+                    "Thickness mm (optional, 0 = not set)",
+                    min_value=0.0,
+                    value=float(
+                        default_thickness
+                        or 0.0
+                    ),
+                    step=1.0,
+                    key=(
+                        f"additem_thickness_"
+                        f"{widget_suffix}"
+                    ),
+                )
+
+            with f5:
+
+                brand_model = st.text_input(
+                    "Brand / model (optional)",
+                    key=(
+                        f"additem_brand_"
+                        f"{widget_suffix}"
+                    ),
+                )
+
+            if chosen:
+
+                st.caption(
+                    f'Market prices are per '
+                    f'{chosen["unit"]}, without VAT.'
+                )
+
+            submitted = st.form_submit_button(
+                "Save and use",
+                type="primary",
+            )
+
+        if not submitted:
+            return
+
+        new_key = catalog_item_key({
+            "name": name,
+            "category": category,
+            "unit": unit,
+        })
+
+        if any(
+            catalog_item_key(item) == new_key
+            for item in all_items
+        ):
+
+            st.error(
+                "An item with this name, category "
+                "and unit already exists. Choose it "
+                "from the Price-list item list."
+            )
+
+            return
+
+        try:
+
+            new_item = add_catalog_item(
+                name=name,
+                category=category,
+                unit=unit,
+                price=price,
+                source_type=(
+                    "market"
+                    if chosen
+                    else "manual"
+                ),
+                source_url=source_url,
+                material_type=ai_part.get(
+                    "material"
+                ),
+                component_type=ai_part.get(
+                    "component_type"
+                ),
+                thickness_mm=thickness,
+                brand_model=brand_model,
+                added_for_part=ai_part.get(
+                    "name"
+                ),
+            )
+
+        except Exception as error:
+
+            st.error(
+                f"Could not add the item: "
+                f"{error}"
+            )
+
+            return
+
+        load_added_items.clear()
+
+        st.session_state[
+            f"additem_pick_"
+            f"{part_index}"
+        ] = catalog_item_key(
+            new_item
+        )
+
+        st.session_state[
+            "feedback_notice"
+        ] = (
+            f'Added "{new_item["name"]}" '
+            f'(€{new_item["price"]:.2f}/{new_item["unit"]}) '
+            f'to the price list and selected it.'
+        )
+
+        st.rerun()
+
+
 def remember_catalog_choice(
     part_index
 ):
@@ -1048,6 +1468,10 @@ def clear_product():
             or
             str(key).startswith(
                 "quote_"
+            )
+            or
+            str(key).startswith(
+                "additem_"
             )
         ):
             keys_to_delete.append(
@@ -1521,6 +1945,54 @@ if matches:
         )
 
 
+        picked_key = st.session_state.pop(
+            f"additem_pick_"
+            f"{part_index}",
+            None,
+        )
+
+        if picked_key is not None:
+
+            picked_item = next(
+                (
+                    option
+                    for option in options
+                    if option is not None
+                    and catalog_item_key(option)
+                    == picked_key
+                ),
+                None,
+            )
+
+            if picked_item is not None:
+
+                st.session_state[
+                    f"catalog_select_"
+                    f"{part_index}"
+                ] = picked_item
+
+                default_index = 0
+
+                market_result = match.get(
+                    "market_result"
+                )
+
+                remember_catalog_choice(
+                    part_index
+                )
+
+                st.session_state.pop(
+                    "feedback_notice",
+                    None,
+                )
+
+                if market_result is not None:
+
+                    match[
+                        "market_result"
+                    ] = market_result
+
+
         selected_item = (
             st.selectbox(
                 "Price-list item",
@@ -1537,6 +2009,11 @@ if matches:
                             f'— {item["category"]} '
                             f'— {item["unit"]} '
                             f'— €{float(item["price"]):.2f}'
+                            + (
+                                " · added"
+                                if item.get("source_type")
+                                else ""
+                            )
                         )
                     )
                 ),
@@ -1583,6 +2060,12 @@ if matches:
                 f"AI reasoning: "
                 f"{reason}"
             )
+
+
+        show_add_item_form(
+            match,
+            ai_part,
+        )
 
 
         if selected_item is not None:
