@@ -25,6 +25,11 @@ from component_matcher import (
     normalize_unit,
 )
 from market_prices import search_market_prices
+from catalog_store import (
+    add_catalog_item,
+    catalog_item_exists,
+    load_catalog_additions,
+)
 from quote_generator import (
     build_quote_pdf,
     calculate_quote_totals,
@@ -64,9 +69,17 @@ def load_data():
 
 price_data = load_data()
 
-all_items = price_data[
+all_items = list(price_data[
     "items"
-]
+])
+
+# Estimator-approved additions are kept separate from the source workbook.
+# This protects prices.xlsx while making saved items available immediately
+# on the next Streamlit rerun.
+catalog_additions = load_catalog_additions()
+for catalog_item in catalog_additions:
+    if not catalog_item_exists(all_items, catalog_item):
+        all_items.append(catalog_item)
 
 markups = price_data[
     "markups"
@@ -450,271 +463,260 @@ MARKET_CATEGORY_BY_TYPE = {
 }
 
 
+def add_review_issue(
+    issues,
+    part_index,
+    part_name,
+    issue_type,
+    detail,
+):
+    """Add one de-duplicated estimator review warning."""
+    key = (
+        part_index,
+        str(issue_type),
+        str(detail),
+    )
+
+    if any(issue.get("_key") == key for issue in issues):
+        return
+
+    issues.append({
+        "_key": key,
+        "part_index": part_index,
+        "part_name": str(part_name or "Unknown part"),
+        "issue_type": str(issue_type),
+        "detail": str(detail),
+    })
+
+
+def custom_item_defaults(ai_part):
+    component_type = str(
+        ai_part.get("component_type") or ""
+    ).strip().lower()
+
+    category = MARKET_CATEGORY_BY_TYPE.get(
+        component_type
+    )
+
+    unit_by_type = {
+        "panel": "m2",
+        "glass": "m2",
+        "mirror": "m2",
+        "profile": "m",
+        "edge": "m",
+        "led": "m",
+        "hardware": "pcs",
+        "service": "pcs",
+    }
+
+    return category, unit_by_type.get(
+        component_type,
+        "pcs",
+    )
+
+
+def market_price_warning(
+    match,
+    selected_item,
+    threshold_percent=35.0,
+):
+    """Return a warning string when catalog and market differ materially."""
+    if selected_item is None or selected_item.get("market"):
+        return None
+
+    result = match.get("market_result")
+    if not result:
+        return None
+
+    groups = result.get("groups") or []
+    if len(groups) != 1:
+        return None
+
+    group = groups[0]
+    market_average = float(group.get("average") or 0)
+    if market_average <= 0:
+        return None
+
+    try:
+        list_price = float(selected_item.get("price") or 0)
+    except (TypeError, ValueError):
+        return None
+
+    if list_price <= 0:
+        return None
+
+    difference = (
+        (list_price - market_average)
+        / market_average
+        * 100
+    )
+
+    if abs(difference) < threshold_percent:
+        return None
+
+    direction = "above" if difference > 0 else "below"
+    return (
+        f'Catalog price is {abs(difference):.0f}% {direction} '
+        f'the checked market average.'
+    )
+
+
 def show_market_check(
     match,
     ai_part,
     selected_item,
 ):
     part_index = match["part_index"]
-
-    result = match.get(
-        "market_result"
-    )
+    result = match.get("market_result")
 
     with st.expander(
         "Market price check",
-        expanded=(
-            result is not None
-            or selected_item is None
-        ),
+        expanded=(result is not None or selected_item is None),
     ):
-
         if st.button(
-            (
-                "Check market prices"
-                if result is None
-                else "Search again"
-            ),
-            key=(
-                f"market_check_"
-                f"{part_index}"
-            ),
+            "Check market prices" if result is None else "Search again",
+            key=f"market_check_{part_index}",
         ):
-
-            with st.spinner(
-                "Searching shops..."
-            ):
-
+            with st.spinner("Searching shops..."):
                 try:
-
-                    result = search_market_prices(
-                        ai_part,
-                        selected_item,
-                    )
-
+                    result = search_market_prices(ai_part, selected_item)
                     result["searched_for"] = (
                         selected_item["name"]
                         if selected_item is not None
                         else ai_part.get("name")
                     )
-
-                    match[
-                        "market_result"
-                    ] = result
-
-                    match.pop(
-                        "market_error",
-                        None,
-                    )
-
+                    match["market_result"] = result
+                    match.pop("market_error", None)
                 except Exception as error:
-
-                    print(
-                        "MARKET PRICE ERROR:",
-                        repr(error),
-                    )
-
-                    match[
-                        "market_error"
-                    ] = str(error)
-
+                    print("MARKET PRICE ERROR:", repr(error))
+                    match["market_error"] = str(error)
             st.rerun()
 
-        if match.get(
-            "market_error"
-        ):
-
-            st.error(
-                f'Market price search failed: '
-                f'{match["market_error"]}'
-            )
+        if match.get("market_error"):
+            st.error(f'Market price search failed: {match["market_error"]}')
 
         if result is None:
-
             st.caption(
-                "Searches online shops for this "
-                "part. Prices are shown "
-                "without 21% VAT. The price-list "
-                "price always comes first."
+                "Searches online shops for this part. Prices are shown without VAT. "
+                "For unmatched parts, choose a real offer below rather than saving "
+                "a market average as a catalog product."
             )
-
             return None
 
         unit = result["unit"]
-
         thickness_text = ""
-
-        if result.get(
-            "target_thickness"
-        ):
-
+        if result.get("target_thickness"):
             thickness_text = (
-                f' Thickness: '
-                f'{result["target_thickness"]:g} mm '
+                f' Thickness: {result["target_thickness"]:g} mm '
                 f'(from the {result["thickness_source"]}).'
             )
 
         st.caption(
-            f'Searched for: '
-            f'{result.get("searched_for")}. '
-            f'Prices per {unit}, without VAT.'
-            f'{thickness_text}'
+            f'Searched for: {result.get("searched_for")}. '
+            f'Prices per {unit}, without VAT.{thickness_text}'
         )
 
-        groups = result["groups"]
+        groups = result.get("groups") or []
+        offers = result.get("offers") or []
 
         if result.get("shops") == 1:
-
             st.warning(
                 f'All prices come from one shop '
                 f'({", ".join(result.get("shop_names") or [])}), '
-                f"so this is that shop's price, "
-                f'not a market average.'
+                "so this is that shop's price, not a market average."
             )
 
         list_price = None
-
         if (
             selected_item is not None
-            and normalize_unit(
-                selected_item["unit"]
-            )
-            == unit
+            and normalize_unit(selected_item["unit"]) == unit
         ):
-
-            list_price = float(
-                selected_item["price"]
-            )
+            list_price = float(selected_item["price"])
 
         if not groups:
-
-            st.warning(
-                "No usable prices were found."
-            )
-
+            st.warning("No usable prices were found.")
         elif len(groups) == 1:
-
             group = groups[0]
-
-            c1, c2, c3, c4 = (
-                st.columns(4)
-            )
-
+            c1, c2, c3, c4 = st.columns(4)
             with c1:
-
-                st.metric(
-                    "Market average",
-                    f'€{group["average"]:.2f}',
-                )
-
+                st.metric("Market average", f'€{group["average"]:.2f}')
             with c2:
-
-                st.metric(
-                    "Lowest",
-                    f'€{group["min"]:.2f}',
-                )
-
+                st.metric("Lowest", f'€{group["min"]:.2f}')
             with c3:
-
-                st.metric(
-                    "Highest",
-                    f'€{group["max"]:.2f}',
-                )
-
+                st.metric("Highest", f'€{group["max"]:.2f}')
             with c4:
-
                 st.metric(
                     "Shops / offers",
                     f'{group["shops"]} / {group["offers"]}',
                 )
 
             if group.get("note"):
-
+                st.caption(f'Note: {group["note"]}.')
+            if group.get("similar_left_out"):
                 st.caption(
-                    f'Note: {group["note"]}.'
+                    "The average uses only exact matches. "
+                    f'{group["similar_left_out"]} similar product(s) are listed '
+                    "below but not averaged."
                 )
-
-            if group["similar_left_out"]:
-
-                st.caption(
-                    f'The average uses only exact '
-                    f'matches. {group["similar_left_out"]} '
-                    f'similar product(s) are listed '
-                    f'below but not averaged.'
-                )
-
-            if list_price is not None:
-
+            if list_price is not None and group.get("average"):
                 difference = (
                     (list_price - group["average"])
                     / group["average"]
                     * 100
                 )
-
                 st.info(
                     f'Price list: €{list_price:.2f}/{unit}, '
                     f'{abs(difference):.0f}% '
                     f'{"above" if difference > 0 else "below"} '
-                    f'the market average. The price-list '
-                    f'price is used in the estimate.'
+                    "the market average. The price-list price is used in the estimate."
                 )
-
         else:
-
             st.warning(
-                "Different thicknesses were found, so "
-                "prices are shown separately for each "
-                "thickness."
+                "Different thicknesses were found, so prices are shown separately "
+                "for each thickness."
             )
-
             group_rows = []
-
             for group in groups:
-
                 row = {
                     "Thickness": group["label"],
                     f"Average € / {unit}": group["average"],
                     "Lowest": group["min"],
                     "Highest": group["max"],
-                    "Shops / offers": (
-                        f'{group["shops"]} / {group["offers"]}'
-                    ),
-                    "Similar, not averaged": (
-                        group["similar_left_out"]
-                    ),
+                    "Shops / offers": f'{group["shops"]} / {group["offers"]}',
+                    "Similar, not averaged": group["similar_left_out"],
                     "Note": group.get("note") or "",
                 }
-
-                if list_price is not None:
-
+                if list_price is not None and group.get("average"):
                     difference = (
                         (list_price - group["average"])
                         / group["average"]
                         * 100
                     )
-
                     row["Price list vs market"] = (
                         f'{abs(difference):.0f}% '
                         f'{"above" if difference > 0 else "below"}'
                     )
-
                 group_rows.append(row)
+            st.dataframe(group_rows, hide_index=True, use_container_width=True)
 
-            st.dataframe(
-                group_rows,
-                hide_index=True,
+        if result.get("skipped"):
+            st.caption(
+                "Not used: "
+                + "; ".join(
+                    f'{offer.get("shop")} ({offer["skip_reason"]})'
+                    for offer in result["skipped"]
+                )
             )
 
-            if list_price is not None:
+        if result.get("notes"):
+            st.caption(f'Search notes: {result["notes"]}')
 
-                st.caption(
-                    f'Price list: €{list_price:.2f}/{unit}. '
-                    f'The price-list price is used in '
-                    f'the estimate.'
-                )
+        if not offers:
+            return None
 
-        if result["offers"]:
-
+        # When a valid catalog item is already selected, market prices remain
+        # reference-only. The price-list item continues to drive the estimate.
+        if selected_item is not None:
             st.dataframe(
                 [
                     {
@@ -726,146 +728,147 @@ def show_market_check(
                             else "-"
                         ),
                         "Shop price": (
-                            f'€{offer["price"]:.2f} / '
-                            f'{offer["price_unit"]}'
-                            + (
-                                " incl. VAT"
-                                if offer["includes_vat"]
-                                else " excl. VAT"
-                            )
+                            f'€{offer["price"]:.2f} / {offer["price_unit"]}'
+                            + (" incl. VAT" if offer["includes_vat"] else " excl. VAT")
                         ),
-                        f"€ per {unit} excl. VAT": (
-                            offer[
-                                "price_excl_vat_per_unit"
-                            ]
-                        ),
+                        f"€ per {unit} excl. VAT": offer["price_excl_vat_per_unit"],
                         "Match": offer["match"],
-                        "In average": (
-                            "✓"
-                            if offer.get("in_average")
-                            else "–"
-                        ),
+                        "In average": "✓" if offer.get("in_average") else "–",
                         "Link": offer["url"],
                     }
-                    for offer in result["offers"]
+                    for offer in offers
                 ],
-                column_config={
-                    "Link": st.column_config.LinkColumn(
-                        "Link"
-                    ),
-                },
+                column_config={"Link": st.column_config.LinkColumn("Link")},
                 hide_index=True,
+                use_container_width=True,
             )
-
-        if result["skipped"]:
-
-            st.caption(
-                "Not used: "
-                + "; ".join(
-                    f'{offer.get("shop")} '
-                    f'({offer["skip_reason"]})'
-                    for offer in result["skipped"]
-                )
-            )
-
-        if result.get("notes"):
-
-            st.caption(
-                f'Search notes: '
-                f'{result["notes"]}'
-            )
-
-        if (
-            selected_item is not None
-            or not groups
-        ):
             return None
 
-        group = groups[0]
+        st.markdown("**Choose a market offer**")
+        st.caption(
+            "Select one real offer to use in this estimate. You can also save "
+            "that exact offer to the catalog for future estimates."
+        )
 
-        if len(groups) > 1:
-
-            group_labels = [
-                candidate["label"]
-                for candidate in groups
-            ]
-
-            chosen_label = st.selectbox(
-                "Thickness to use",
-                group_labels,
-                key=(
-                    f"market_thickness_"
-                    f"{part_index}"
+        offer_rows = []
+        for offer_index, offer in enumerate(offers):
+            offer_rows.append({
+                "Use": False,
+                "Add to catalog": False,
+                "Shop": offer.get("shop") or "",
+                "Product": offer.get("product_name") or ai_part.get("name") or "Market item",
+                "Thickness": (
+                    f'{offer["thickness"]:g} mm'
+                    if offer.get("thickness")
+                    else "-"
                 ),
-            )
+                f"€ per {unit} excl. VAT": float(offer["price_excl_vat_per_unit"]),
+                "Match": offer.get("match") or "",
+                "Link": offer.get("url") or "",
+                "_offer_index": offer_index,
+            })
 
-            group = groups[
-                group_labels.index(
-                    chosen_label
-                )
-            ]
+        edited_offers = st.data_editor(
+            offer_rows,
+            hide_index=True,
+            use_container_width=True,
+            disabled=[
+                "Shop",
+                "Product",
+                "Thickness",
+                f"€ per {unit} excl. VAT",
+                "Match",
+                "Link",
+                "_offer_index",
+            ],
+            column_config={
+                "Use": st.column_config.CheckboxColumn("Use", default=False),
+                "Add to catalog": st.column_config.CheckboxColumn(
+                    "Add to catalog",
+                    default=False,
+                ),
+                f"€ per {unit} excl. VAT": st.column_config.NumberColumn(
+                    f"€ per {unit} excl. VAT",
+                    format="€%.2f",
+                ),
+                "Link": st.column_config.LinkColumn("Link"),
+                "_offer_index": None,
+            },
+            key=f"market_offer_editor_{part_index}",
+        )
+
+        if hasattr(edited_offers, "to_dict"):
+            edited_rows = edited_offers.to_dict(orient="records")
+        else:
+            edited_rows = list(edited_offers)
 
         category_options = sorted(
-            set(
-                item["category"]
-                for item in valid_catalog_items
-            )
+            set(item["category"] for item in valid_catalog_items)
         )
-
-        default_category = (
-            MARKET_CATEGORY_BY_TYPE.get(
-                str(
-                    ai_part.get("component_type")
-                    or ""
-                ).lower()
-            )
+        default_category = MARKET_CATEGORY_BY_TYPE.get(
+            str(ai_part.get("component_type") or "").lower()
         )
+        if default_category not in category_options:
+            default_category = category_options[0] if category_options else "FURNITURA"
 
         category = st.selectbox(
-            "Category for the coefficient",
-            category_options,
+            "Category for the coefficient / catalog",
+            category_options or [default_category],
             index=(
-                category_options.index(
-                    default_category
-                )
-                if default_category
-                in category_options
+                category_options.index(default_category)
+                if default_category in category_options
                 else 0
             ),
-            key=(
-                f"market_category_"
-                f"{part_index}"
-            ),
+            key=f"market_category_{part_index}",
         )
 
-        if not st.toggle(
-            (
-                f'Use market price '
-                f'€{group["average"]:.2f}/{unit} '
-                f'in the estimate'
-            ),
-            key=(
-                f"market_use_"
-                f"{part_index}"
-            ),
-        ):
+        selected_rows = [row for row in edited_rows if row.get("Use")]
+        if len(selected_rows) > 1:
+            st.warning("Choose only one market offer to use in the estimate.")
             return None
 
-        thickness_name = (
-            f', {group["label"]}'
-            if group["thickness"]
-            else ""
-        )
+        # Save every explicitly checked offer. Duplicate protection keeps this safe
+        # across Streamlit reruns.
+        for row in edited_rows:
+            if not row.get("Add to catalog"):
+                continue
+            offer = offers[int(row["_offer_index"])]
+            candidate = {
+                "name": offer.get("product_name") or ai_part.get("name") or "Market item",
+                "category": category,
+                "unit": unit,
+                "price": float(offer["price_excl_vat_per_unit"]),
+                "source": offer.get("shop") or "Market search",
+                "source_url": offer.get("url") or "",
+                "source_type": "market",
+                "thickness_mm": offer.get("thickness"),
+                "market_match": offer.get("match") or "",
+            }
+            if catalog_item_exists(all_items, candidate):
+                st.info(f'Already in catalog: {candidate["name"]}')
+            else:
+                try:
+                    created, _ = add_catalog_item(candidate)
+                    if created:
+                        st.success(f'Added to catalog: {candidate["name"]}')
+                except Exception as error:
+                    st.error(f"Could not add this market item to the catalog: {error}")
 
+        if not selected_rows:
+            return None
+
+        chosen_row = selected_rows[0]
+        offer = offers[int(chosen_row["_offer_index"])]
         return {
-            "name": (
-                f'{ai_part.get("name")} '
-                f'(market price{thickness_name})'
-            ),
+            "name": offer.get("product_name") or ai_part.get("name") or "Market item",
             "category": category,
             "unit": unit,
-            "price": group["average"],
+            "price": float(offer["price_excl_vat_per_unit"]),
             "market": True,
+            "market_offer": True,
+            "source": offer.get("shop") or "Market search",
+            "source_url": offer.get("url") or "",
+            "market_match": offer.get("match") or "",
         }
 
 
@@ -1296,6 +1299,9 @@ confirmed_items = []
 
 confirmed_choices = []
 
+review_issues = []
+st.session_state["current_review_issues"] = []
+
 
 if matches:
 
@@ -1613,27 +1619,154 @@ if matches:
 
 
         # ------------------------------------------
-        # NO MATCH
+        # NO MATCH WORKFLOW
         # ------------------------------------------
 
         if selected_item is None:
 
-            market_item = show_market_check(
-                match,
-                ai_part,
-                None,
+            st.warning(
+                "No catalog match is selected. Choose a market offer or create "
+                "a custom item if you want to price this part. If you do nothing, "
+                "the part simply remains unresolved."
             )
 
-            if market_item is None:
+            resolution = st.radio(
+                "Resolve this part",
+                [
+                    "Check market price",
+                    "Create custom item",
+                ],
+                index=None,
+                key=f"no_match_resolution_{part_index}",
+                horizontal=True,
+            )
 
-                st.warning(
-                    "This drawing part is not "
-                    "included in the estimate yet."
+            if resolution == "Check market price":
+                market_item = show_market_check(match, ai_part, None)
+                if market_item is None:
+                    add_review_issue(
+                        review_issues,
+                        part_index,
+                        ai_part.get("name"),
+                        "No match",
+                        "No market offer has been selected for this unresolved part.",
+                    )
+                    continue
+                selected_item = market_item
+
+            elif resolution == "Create custom item":
+                default_category, default_unit = custom_item_defaults(ai_part)
+
+                category_options = sorted(
+                    set(item["category"] for item in valid_catalog_items)
+                )
+                if default_category not in category_options:
+                    default_category = category_options[0] if category_options else "FURNITURA"
+
+                unit_options = sorted(set(
+                    ["pcs", "set", "m", "m2", "hour"]
+                    + [
+                        normalize_unit(item.get("unit"))
+                        for item in valid_catalog_items
+                        if item.get("unit")
+                    ]
+                ))
+
+                c1, c2 = st.columns(2)
+                with c1:
+                    custom_name = st.text_input(
+                        "Custom item name",
+                        value=str(ai_part.get("name") or "Custom item"),
+                        key=f"custom_name_{part_index}",
+                    )
+                    custom_category = st.selectbox(
+                        "Category",
+                        category_options or [default_category],
+                        index=(
+                            category_options.index(default_category)
+                            if default_category in category_options
+                            else 0
+                        ),
+                        key=f"custom_category_{part_index}",
+                    )
+                with c2:
+                    custom_unit = st.selectbox(
+                        "Unit",
+                        unit_options,
+                        index=(
+                            unit_options.index(default_unit)
+                            if default_unit in unit_options
+                            else 0
+                        ),
+                        key=f"custom_unit_{part_index}",
+                    )
+                    custom_price = st.number_input(
+                        "Unit price (excl. VAT)",
+                        min_value=0.0,
+                        value=0.0,
+                        step=1.0,
+                        format="%.2f",
+                        key=f"custom_price_{part_index}",
+                    )
+
+                save_custom = st.checkbox(
+                    "Add to catalog for future estimates",
+                    key=f"custom_add_catalog_{part_index}",
                 )
 
+                if custom_price <= 0:
+                    add_review_issue(
+                        review_issues,
+                        part_index,
+                        ai_part.get("name"),
+                        "Custom item",
+                        "Custom item still needs a unit price.",
+                    )
+                    continue
+
+                selected_item = {
+                    "name": custom_name.strip() or "Custom item",
+                    "category": custom_category,
+                    "unit": custom_unit,
+                    "price": float(custom_price),
+                    "custom": True,
+                }
+
+                if save_custom:
+                    if catalog_item_exists(all_items, selected_item):
+                        st.info(f'Already in catalog: {selected_item["name"]}')
+                    else:
+                        try:
+                            created, _ = add_catalog_item({
+                                **selected_item,
+                                "source": "Estimator custom item",
+                                "source_type": "custom",
+                            })
+                            if created:
+                                st.success(
+                                    f'Added to catalog for future estimates: '
+                                    f'{selected_item["name"]}'
+                                )
+                        except Exception as error:
+                            st.error(f"Could not add the custom item to the catalog: {error}")
+
+                st.caption(
+                    "The custom item is included in this estimate. "
+                    "Saving it to the catalog is optional."
+                )
+
+            else:
+                add_review_issue(
+                    review_issues,
+                    part_index,
+                    ai_part.get("name"),
+                    "No match",
+                    "Part is unresolved and is not included in the estimate yet.",
+                )
                 continue
 
-            selected_item = market_item
+        else:
+            match["ignored_for_estimate"] = False
 
 
         # ------------------------------------------
@@ -1677,6 +1810,15 @@ if matches:
                 calculated_quantity
             )
 
+        if quantity <= 0:
+            add_review_issue(
+                review_issues,
+                part_index,
+                ai_part.get("name"),
+                "Quantity",
+                "Quantity is zero, so this part contributes no price.",
+            )
+
 
         # ------------------------------------------
         # PRICE
@@ -1694,6 +1836,14 @@ if matches:
             st.error(
                 "Selected catalog item has "
                 "no valid coefficient."
+            )
+
+            add_review_issue(
+                review_issues,
+                part_index,
+                ai_part.get("name"),
+                "Coefficient",
+                "Selected category has no valid coefficient.",
             )
 
             continue
@@ -1782,6 +1932,38 @@ if matches:
             )
 
 
+        ai_choice_for_review = same_catalog_item(
+            selected_item,
+            ai_price_item,
+        )
+
+        if (
+            ai_choice_for_review
+            and not match.get("learned")
+            and confidence < 0.70
+        ):
+            add_review_issue(
+                review_issues,
+                part_index,
+                ai_part.get("name"),
+                "Low match confidence",
+                f"AI catalog confidence is {confidence * 100:.0f}%.",
+            )
+
+        price_warning = market_price_warning(
+            match,
+            selected_item,
+        )
+
+        if price_warning:
+            add_review_issue(
+                review_issues,
+                part_index,
+                ai_part.get("name"),
+                "Market price difference",
+                price_warning,
+            )
+
         confirmed_items.append({
             "name": selected_item[
                 "name"
@@ -1794,10 +1976,18 @@ if matches:
             "unit": selected_item[
                 "unit"
             ],
+            "source": (
+                "custom"
+                if selected_item.get("custom")
+                else "market"
+                if selected_item.get("market")
+                else "catalog"
+            ),
         })
 
-        if not selected_item.get(
-            "market"
+        if (
+            not selected_item.get("market")
+            and not selected_item.get("custom")
         ):
 
             confirmed_choices.append(
@@ -1806,6 +1996,51 @@ if matches:
                     selected_item,
                 )
             )
+
+
+# --------------------------------------------------
+# NEEDS REVIEW SUMMARY
+# --------------------------------------------------
+
+st.session_state["current_review_issues"] = [
+    {key: value for key, value in issue.items() if key != "_key"}
+    for issue in review_issues
+]
+
+if matches:
+    st.divider()
+    st.subheader("Needs review")
+
+    total_parts = len(matches)
+    issue_part_indexes = {
+        issue.get("part_index")
+        for issue in review_issues
+    }
+    reviewed_count = max(0, total_parts - len(issue_part_indexes))
+
+    r1, r2, r3 = st.columns(3)
+    with r1:
+        st.metric("Detected parts", total_parts)
+    with r2:
+        st.metric("No current warning", reviewed_count)
+    with r3:
+        st.metric("Warnings", len(review_issues))
+
+    if review_issues:
+        st.warning(
+            "Review the items below before relying on the estimate. "
+            "Warnings do not block testing or quotation generation."
+        )
+
+        for issue in review_issues:
+            st.markdown(
+                f'- **{issue["part_name"]}** — '
+                f'{issue["issue_type"]}: {issue["detail"]}'
+            )
+    else:
+        st.success(
+            "No current component-level warnings were detected."
+        )
 
 
 # --------------------------------------------------
@@ -1931,105 +2166,6 @@ if confirmed_items:
         )
 
         st.rerun()
-
-
-# --------------------------------------------------
-# DRAWING INFORMATION
-# --------------------------------------------------
-
-st.divider()
-
-st.subheader(
-    "Drawing details"
-)
-
-
-st.text_input(
-    "Furniture name",
-    key="furniture_name",
-)
-
-
-st.selectbox(
-    "Furniture type",
-    [
-        "Wardrobe",
-        "Kitchen",
-        "Table",
-        "Desk",
-        "Shelf",
-        "Cabinet",
-        "Bed",
-        "Other",
-    ],
-    key="furniture_type",
-)
-
-
-d1, d2, d3 = (
-    st.columns(3)
-)
-
-
-with d1:
-
-    st.number_input(
-        "Overall width (mm)",
-        min_value=0.0,
-        step=10.0,
-        key="overall_width",
-    )
-
-
-with d2:
-
-    st.number_input(
-        "Overall height (mm)",
-        min_value=0.0,
-        step=10.0,
-        key="overall_height",
-    )
-
-
-with d3:
-
-    st.number_input(
-        "Overall depth (mm)",
-        min_value=0.0,
-        step=10.0,
-        key="overall_depth",
-    )
-
-
-d1, d2 = (
-    st.columns(2)
-)
-
-
-with d1:
-
-    st.number_input(
-        "Doors",
-        min_value=0,
-        step=1,
-        key="door_count",
-    )
-
-
-with d2:
-
-    st.number_input(
-        "Shelves",
-        min_value=0,
-        step=1,
-        key="shelf_count",
-    )
-
-
-st.text_area(
-    "Notes",
-    key="drawing_notes",
-)
 
 
 # --------------------------------------------------
@@ -2309,10 +2445,21 @@ else:
                 f'**'
             )
 
+            source_label = {
+                "custom": "Custom item",
+                "market": "Market price",
+                "catalog": "Catalog",
+            }.get(
+                item.get("source"),
+                "",
+            )
+
+            category_caption = item["category"]
+            if source_label:
+                category_caption += f" · {source_label}"
+
             st.caption(
-                item[
-                    "category"
-                ]
+                category_caption
             )
 
 
@@ -2433,6 +2580,94 @@ if st.session_state[
                 f'€'
                 f'{result["total"]:.2f}'
             ),
+        )
+
+
+    # --------------------------------------------------
+    # CALCULATION BREAKDOWN
+    # --------------------------------------------------
+
+    with st.expander(
+        "Calculation breakdown",
+        expanded=False,
+    ):
+        breakdown_rows = []
+        calculated_subtotal = 0.0
+
+        for item in st.session_state["items"]:
+            item_markup = get_markup(
+                item.get("category")
+            )
+            if item_markup is None:
+                continue
+
+            item_quantity = float(
+                item.get("quantity") or 0
+            )
+            item_unit_price = float(
+                item.get("unit_price") or 0
+            )
+            raw_cost = item_quantity * item_unit_price
+            sale_cost = raw_cost * float(item_markup)
+            calculated_subtotal += sale_cost
+
+            breakdown_rows.append({
+                "Item": item.get("name") or "",
+                "Qty": item_quantity,
+                "Unit": item.get("unit") or "",
+                "Unit price": item_unit_price,
+                "Raw cost": raw_cost,
+                "Category": item.get("category") or "",
+                "Coefficient": float(item_markup),
+                "After coefficient": sale_cost,
+            })
+
+        if breakdown_rows:
+            st.dataframe(
+                breakdown_rows,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Unit price": st.column_config.NumberColumn(
+                        "Unit price",
+                        format="€%.2f",
+                    ),
+                    "Raw cost": st.column_config.NumberColumn(
+                        "Raw cost",
+                        format="€%.2f",
+                    ),
+                    "Coefficient": st.column_config.NumberColumn(
+                        "Coefficient",
+                        format="×%.2f",
+                    ),
+                    "After coefficient": st.column_config.NumberColumn(
+                        "After coefficient",
+                        format="€%.2f",
+                    ),
+                },
+            )
+
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            st.metric(
+                "After category coefficients",
+                f"€{calculated_subtotal:.2f}",
+            )
+        with b2:
+            st.metric(
+                "Global multiplier",
+                f"×{final_multiplier:g}",
+            )
+        with b3:
+            st.metric(
+                "Calculated selling price",
+                f"€{result['total']:.2f}",
+            )
+
+        st.caption(
+            "Raw cost = quantity × catalog/custom unit price. "
+            "After coefficient = raw cost × category coefficient. "
+            "The project multiplier is applied to the subtotal afterwards."
         )
 
 
@@ -2678,26 +2913,139 @@ if st.session_state[
             f'€{quote_totals["total_with_vat"]:.2f}',
         )
 
+    # --------------------------------------------------
+    # QUOTATION PREVIEW
+    # --------------------------------------------------
+
+    st.markdown("**Quotation preview**")
+
+    meta1, meta2, meta3 = st.columns(3)
+    with meta1:
+        st.caption("Client")
+        st.write(client_name or "—")
+    with meta2:
+        st.caption("Quote number")
+        st.write(quote_number or "—")
+    with meta3:
+        st.caption("Valid until")
+        st.write(
+            validity_date.strftime("%d/%m/%Y")
+            if hasattr(validity_date, "strftime")
+            else validity_date
+        )
+
+    preview_rows = [{
+        "Nr.": 1,
+        "Product / service": quote_product_name or "Furniture",
+        "Unit price": float(final_client_price),
+        "Quantity": 1.0,
+        "Total excl. VAT": float(final_client_price),
+    }]
+
+    for service_index, service in enumerate(
+        quote_totals["services"],
+        start=2,
+    ):
+        preview_rows.append({
+            "Nr.": service_index,
+            "Product / service": service["name"],
+            "Unit price": service["price"],
+            "Quantity": service["quantity"],
+            "Total excl. VAT": service["total"],
+        })
+
+    st.dataframe(
+        preview_rows,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Unit price": st.column_config.NumberColumn(
+                "Unit price",
+                format="€%.2f",
+            ),
+            "Total excl. VAT": st.column_config.NumberColumn(
+                "Total excl. VAT",
+                format="€%.2f",
+            ),
+        },
+    )
+
+    pv1, pv2, pv3, pv4 = st.columns(4)
+    with pv1:
+        st.metric(
+            "Subtotal",
+            f'€{quote_totals["subtotal_before_discount"]:.2f}',
+        )
+    with pv2:
+        st.metric(
+            "Discount",
+            f'€{quote_totals["discount_amount"]:.2f}',
+        )
+    with pv3:
+        st.metric(
+            f'VAT {vat_percent:g}% ',
+            f'€{quote_totals["vat_amount"]:.2f}',
+        )
+    with pv4:
+        st.metric(
+            "TOTAL",
+            f'€{quote_totals["total_with_vat"]:.2f}',
+        )
+
+    # --------------------------------------------------
+    # READY-TO-QUOTE WARNINGS (NON-BLOCKING)
+    # --------------------------------------------------
+
+    quote_warnings = []
+
+    for issue in st.session_state.get(
+        "current_review_issues",
+        [],
+    ):
+        quote_warnings.append(
+            f'{issue.get("part_name", "Part")}: '
+            f'{issue.get("issue_type", "warning")} — '
+            f'{issue.get("detail", "")}'
+        )
+
+    if not str(client_name).strip():
+        quote_warnings.append("Client name is empty.")
+
+    if not str(quote_number).strip():
+        quote_warnings.append("Quote number is empty.")
+
+    if not str(quote_product_name).strip():
+        quote_warnings.append("Product / furniture name is empty.")
+
+    if float(final_client_price) <= 0:
+        quote_warnings.append("Final client price is zero.")
+
+    if validity_date < quote_date:
+        quote_warnings.append(
+            "Validity date is earlier than the quote date."
+        )
+
+    if quote_warnings:
+        st.warning(
+            "Ready-to-quote check found warnings. "
+            "They do not block PDF generation while the calculator is being tested."
+        )
+        for warning in quote_warnings:
+            st.markdown(f"- {warning}")
+    else:
+        st.success(
+            "Ready-to-quote check: no current warnings."
+        )
+
     if st.button(
-        "Generate quotation",
+        "Generate quotation PDF",
         type="primary",
         key="generate_quote_button",
     ):
-
-        if not str(client_name).strip():
-            st.error(
-                "Enter the client name before generating the quotation."
-            )
-
-        elif not str(quote_number).strip():
-            st.error(
-                "Enter the quote number before generating the quotation."
-            )
-
-        else:
-            st.session_state[
-                "generated_quote_bytes"
-            ] = build_quote_pdf(
+        # Warnings above are intentionally advisory only during testing.
+        # They never disable or block PDF generation.
+        try:
+            generated_bytes = build_quote_pdf(
                 quote_number=quote_number,
                 quote_date=quote_date,
                 validity_date=validity_date,
@@ -2711,15 +3059,23 @@ if st.session_state[
                 logo_path=LOGO_PATH,
             )
 
-            st.session_state[
-                "generated_quote_filename"
-            ] = quote_filename(
-                quote_number,
-                client_name,
-            )
+            if not generated_bytes:
+                raise ValueError("The PDF generator returned an empty file.")
 
-            st.success(
-                "Quotation PDF generated. Download it below."
+            st.session_state["generated_quote_bytes"] = generated_bytes
+            st.session_state["generated_quote_filename"] = quote_filename(
+                quote_number or "quotation",
+                client_name or "client",
+            )
+            st.success("Quotation PDF generated. Download it below.")
+
+        except Exception as error:
+            st.session_state.pop("generated_quote_bytes", None)
+            st.session_state.pop("generated_quote_filename", None)
+            print("QUOTATION PDF ERROR:", repr(error))
+            st.error(
+                "Quotation generation failed. The warning check did not block it; "
+                f"the PDF generator returned this error: {error}"
             )
 
     if st.session_state.get(
