@@ -27,6 +27,7 @@ from catalog_store import (
     load_live_catalog,
     load_pricing,
 )
+from ui import apply_style, show_header, show_sidebar, step_header
 from quote_generator import (
     build_quote_pdf,
     calculate_quote_totals,
@@ -48,9 +49,7 @@ st.set_page_config(
     layout="wide",
 )
 
-with st.sidebar:
-    st.page_link("app.py", label="Calculator")
-    st.page_link("pages/Admin.py", label="Admin")
+apply_style()
 
 
 # --------------------------------------------------
@@ -121,6 +120,7 @@ markups = {
 # --------------------------------------------------
 
 DEFAULT_SESSION_STATE = {
+    "project_name": "",
     "items": [],
     "furniture_name": "",
     "furniture_type": "Other",
@@ -1061,6 +1061,10 @@ def remember_catalog_choice(
 
 def clear_product():
     st.session_state[
+        "project_name"
+    ] = ""
+
+    st.session_state[
         "items"
     ] = []
 
@@ -1181,19 +1185,36 @@ valid_catalog_items = [
 # HEADER
 # --------------------------------------------------
 
-st.title(
-    "Chisels Play Cost Calculator"
+show_sidebar(st.session_state["project_name"].strip())
+
+show_header(
+    "Cost calculator",
+    "Name the project, upload its drawing, check the matched components "
+    "and prepare the client quotation.",
 )
+
+
+# --------------------------------------------------
+# PROJECT
+# --------------------------------------------------
+
+step_header(1, "Project")
+
+st.text_input(
+    "Project name",
+    key="project_name",
+    placeholder="e.g. Reception desk - Europa office",
+    help="Shown on the quotation PDF and used in its file name.",
+)
+
+project_name = st.session_state["project_name"].strip()
 
 
 # --------------------------------------------------
 # FILE UPLOAD
 # --------------------------------------------------
 
-st.subheader(
-    "Upload drawing / model"
-)
-
+step_header(2, "Drawing")
 
 uploaded_file = st.file_uploader(
     "Upload PDF or image",
@@ -1203,10 +1224,14 @@ uploaded_file = st.file_uploader(
         "jpeg",
         "png",
     ],
+    disabled=not project_name,
 )
 
+if not project_name:
+    st.caption("Name the project first, then upload its drawing.")
 
-if uploaded_file is not None:
+
+if uploaded_file is not None and project_name:
 
     st.success(
         f"Uploaded: "
@@ -1398,13 +1423,17 @@ review_issues = []
 st.session_state["current_review_issues"] = []
 
 
+if not matches:
+    step_header(3, "Review components")
+    st.caption(
+        "The components found in the drawing appear here after it is analysed. "
+        "You can also add components manually in step 4."
+    )
+
+
 if matches:
 
-    st.divider()
-
-    st.subheader(
-        "AI price-list matching"
-    )
+    step_header(3, "Review components")
 
     st.caption(
         "AI chooses an existing price-list "
@@ -2161,8 +2190,9 @@ def reset_estimate_coefficients():
             del st.session_state[key]
 
 
+step_header(4, "Estimate")
+
 if confirmed_items or st.session_state["items"]:
-    st.divider()
     changed_coefficients = st.session_state.get("estimate_coefficients", {})
     with st.expander(
         "Category coefficients for this estimate"
@@ -2331,8 +2361,6 @@ if confirmed_items:
 # --------------------------------------------------
 # MANUAL COMPONENT
 # --------------------------------------------------
-
-st.divider()
 
 st.subheader(
     "Add component manually"
@@ -2837,9 +2865,7 @@ if st.session_state[
 
     st.divider()
 
-    st.subheader(
-        "Client quotation"
-    )
+    step_header(5, "Client quotation")
 
     st.caption(
         "The calculated price stays unchanged internally. "
@@ -2890,10 +2916,27 @@ if st.session_state[
                 st.session_state.get(
                     "furniture_name"
                 )
+                or project_name
                 or "Furniture"
             ),
             key="quote_product_name",
         )
+
+    calculated_total = round(float(result["total"]), 2)
+    previous_total = st.session_state.get("quote_calculated_total")
+    if (
+        "quote_final_client_price" not in st.session_state
+        or (
+            previous_total is not None
+            and previous_total != calculated_total
+            and round(float(st.session_state["quote_final_client_price"]), 2) == previous_total
+        )
+    ):
+        st.session_state["quote_final_client_price"] = calculated_total
+    st.session_state["quote_calculated_total"] = calculated_total
+
+    def use_calculated_price(total):
+        st.session_state["quote_final_client_price"] = total
 
     price_col1, price_col2, price_col3 = st.columns(3)
 
@@ -2907,11 +2950,9 @@ if st.session_state[
         final_client_price = st.number_input(
             "Final client price (excl. VAT)",
             min_value=0.0,
-            value=float(
-                result["total"]
-            ),
             step=50.0,
             key="quote_final_client_price",
+            help="Follows the calculated price until you type your own price.",
         )
 
     with price_col3:
@@ -2924,6 +2965,14 @@ if st.session_state[
             "Price adjustment",
             f'€{price_adjustment:+.2f}',
         )
+
+        if round(price_adjustment, 2) != 0:
+            st.button(
+                "Use calculated price",
+                on_click=use_calculated_price,
+                args=(calculated_total,),
+                key="quote_use_calculated_price",
+            )
 
     st.markdown(
         "**Additional services**"
@@ -3217,6 +3266,7 @@ if st.session_state[
                 discount_value=discount_value,
                 discount_mode=discount_mode,
                 logo_path=LOGO_PATH,
+                project_name=project_name,
             )
 
             if not generated_bytes:
@@ -3226,6 +3276,7 @@ if st.session_state[
             st.session_state["generated_quote_filename"] = quote_filename(
                 quote_number or "quotation",
                 client_name or "client",
+                project_name,
             )
             st.success("Quotation PDF generated. Download it below.")
 

@@ -1,2 +1,21 @@
 [client]
 showSidebarNavigation = false
+
+[theme]
+base = "light"
+primaryColor = "#9C5A2E"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F3EE"
+textColor = "#23242A"
+linkColor = "#9C5A2E"
+borderColor = "#E4DDD2"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "0.6rem"
+buttonRadius = "0.6rem"
+headingFontWeights = [700, 700, 650, 600, 600, 600]
+metricValueFontWeight = 700
+
+[theme.sidebar]
+backgroundColor = "#F6F3EE"
+secondaryBackgroundColor = "#FFFFFF"

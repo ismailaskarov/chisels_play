@@ -11,6 +11,8 @@ The application reads a furniture drawing (PDF or image), extracts priceable com
 ## 1. Main workflow
 
 ```text
+Name the project
+    ↓
 Upload drawing
     ↓
 AI extracts furniture + BOM-level components
@@ -37,6 +39,12 @@ Generate client PDF quotation
 ```
 
 The application deliberately separates the **internal calculated selling price** from the **final client price**. The estimator may adjust the final client price without changing the underlying calculation.
+
+### Layout
+
+The Calculator is laid out as numbered steps: **1 Project**, **2 Drawing**, **3 Review components**, **4 Estimate** and **5 Client quotation**. The drawing upload stays locked until the project has a name; the current project name is shown in the sidebar. Analysing another drawing keeps the project name, and **Clear product** starts a new project (the name is emptied).
+
+The look is set in `.streamlit/config.toml` (light theme with the company colours) and `ui.py` (logo, sidebar menu, step headers). The sidebar shows the Chisels Play logo and the **Calculator** and **Admin** links on both pages.
 
 ---
 
@@ -305,6 +313,7 @@ The quotation includes:
 
 - Chisels Play logo from `data/logo.jpg`;
 - title `KOMERCINIS PASIŪLYMAS`;
+- project name (`Projektas`), when a project name was entered;
 - quote number;
 - date and validity date in `DD/MM/YYYY` format;
 - fixed supplier details;
@@ -409,6 +418,8 @@ chisels_play/
 ├── quote_generator.py
 ├── requirements.txt
 ├── packages.txt             # system packages for Streamlit Cloud (PDF font)
+├── ui.py                    # shared look: logo, sidebar menu, step headers
+├── .streamlit/config.toml   # theme and sidebar settings
 ├── supabase_schema.sql      # Supabase tables (run once in the SQL editor)
 ├── pages/
 │   └── Admin.py             # admin page: approvals, catalog, learned corrections
@@ -416,7 +427,8 @@ chisels_play/
 ├── .env                     # local only - never commit
 ├── .gitignore
 └── data/
-    ├── logo.jpg
+    ├── logo.jpg             # logo in the quotation PDF
+    ├── logo.png             # transparent logo used in the app
     ├── prices.xlsx
     ├── catalog_additions.json  # catalog additions when Supabase is not configured
     └── match_feedback.json     # local fallback when used
@@ -481,6 +493,9 @@ Company price catalog and pricing configuration.
 
 #### `data/logo.jpg`
 Logo used in the quotation PDF.
+
+#### `data/logo.png`
+Transparent version of the logo used in the app header and sidebar.
 
 ---
 

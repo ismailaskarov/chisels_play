@@ -191,6 +191,7 @@ def build_quote_pdf(
     supplier_details=None,
     notes=None,
     logo_path=Path("data") / "logo.jpg",
+    project_name=None,
 ):
     """Build the final client quotation as a PDF."""
 
@@ -295,13 +296,18 @@ def build_quote_pdf(
     story.append(Spacer(1, 1.5 * mm))
 
     # Metadata directly below title, compact like the source quote.
+    project_rows = (
+        [[Paragraph("Projektas", bold), Paragraph(escape(str(project_name).strip()), normal)]]
+        if str(project_name or "").strip()
+        else []
+    )
     metadata = Table(
-        [
+        project_rows + [
             [Paragraph("Numeris", bold), Paragraph(escape(str(quote_number or "")), normal)],
             [Paragraph("Data", bold), Paragraph(format_date(quote_date), normal)],
             [Paragraph("Galiojimo data", bold), Paragraph(format_date(validity_date), normal)],
         ],
-        colWidths=[32 * mm, 44 * mm],
+        colWidths=[32 * mm, 70 * mm],
         hAlign="CENTER",
     )
     metadata.setStyle(TableStyle([
@@ -479,7 +485,9 @@ def build_quote_pdf(
     return output.getvalue()
 
 
-def quote_filename(quote_number, client_name):
-    quote_part = sanitize_filename(quote_number)
-    client_part = sanitize_filename(client_name)
-    return f"{quote_part}_{client_part}.pdf"
+def quote_filename(quote_number, client_name, project_name=None):
+    parts = [sanitize_filename(quote_number)]
+    if str(project_name or "").strip():
+        parts.append(sanitize_filename(project_name))
+    parts.append(sanitize_filename(client_name))
+    return "_".join(parts) + ".pdf"

@@ -33,6 +33,7 @@ from feedback_store import (
     record_votes,
 )
 from price_reader import read_catalog_rows, read_price_data, read_pricing_sheets
+from ui import apply_style, show_sidebar
 
 
 PRICE_FILE = Path("data") / "prices.xlsx"
@@ -47,9 +48,8 @@ st.set_page_config(
     layout="wide",
 )
 
-with st.sidebar:
-    st.page_link("app.py", label="Calculator")
-    st.page_link("pages/Admin.py", label="Admin")
+apply_style()
+show_sidebar()
 
 
 def admin_password():
