@@ -246,11 +246,13 @@ def delete_local(source_key):
 
 
 def supabase_headers(key):
-    return {
+    headers = {
         "apikey": key,
-        "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+    if not key.startswith("sb_"):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
 
 
 def get_supabase_record(source_key, url, key):
@@ -351,17 +353,72 @@ def delete_match_feedback(source_key):
 
 
 def load_match_feedback():
-    records = {}
-    for record in load_local_feedback():
-        records[record.get("source_key")] = record
     url, key = get_supabase_config()
     if url and key:
         try:
-            for record in load_supabase_feedback(url, key):
-                records[record.get("source_key")] = record
+            return load_supabase_feedback(url, key)
         except Exception as error:
-            print("Supabase feedback load failed:", error)
+            print("Supabase feedback load failed, using local file:", error)
+    records = {}
+    for record in load_local_feedback():
+        records[record.get("source_key")] = record
     return list(records.values())
+
+
+FEEDBACK_COLUMNS = (
+    "source_key",
+    "source_name",
+    "source_material",
+    "component_type",
+    "catalog_name",
+    "catalog_category",
+    "catalog_unit",
+    "catalog_price",
+    "ai_catalog_name",
+    "times_chosen",
+    "created_at",
+    "updated_at",
+)
+
+
+def local_feedback_missing_from_supabase():
+    url, key = get_supabase_config()
+    if not (url and key):
+        return []
+    in_supabase = {record.get("source_key") for record in load_supabase_feedback(url, key)}
+    return [
+        record
+        for record in load_local_feedback()
+        if isinstance(record, dict)
+        and record.get("source_key")
+        and record.get("source_key") not in in_supabase
+        and record_votes(record) > 0
+    ]
+
+
+def copy_local_feedback_to_supabase(records):
+    url, key = get_supabase_config()
+    if not (url and key):
+        raise RuntimeError("Supabase is not configured.")
+    now = now_iso()
+    rows = []
+    for record in records:
+        row = {column: record.get(column) for column in FEEDBACK_COLUMNS}
+        row["times_chosen"] = record_votes(record)
+        row["created_at"] = row["created_at"] or now
+        row["updated_at"] = row["updated_at"] or row["created_at"]
+        rows.append(row)
+    headers = supabase_headers(key)
+    headers["Prefer"] = "resolution=ignore-duplicates"
+    for start in range(0, len(rows), 500):
+        response = requests.post(
+            f"{url}/rest/v1/match_feedback?on_conflict=source_key",
+            headers=headers,
+            json=rows[start:start + 500],
+            timeout=30,
+        )
+        response.raise_for_status()
+    return len(rows)
 
 
 def feedback_storage_name():

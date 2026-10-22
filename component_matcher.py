@@ -105,6 +105,16 @@ def is_valid_price_item(item):
 # BUILD CLEAN CATALOG
 # --------------------------------------------------
 
+CATALOG_DETAIL_KEYS = (
+    "material_type",
+    "component_type",
+    "brand_model",
+    "thickness_mm",
+    "keywords",
+    "synonyms",
+)
+
+
 def build_catalog(price_items):
     catalog = []
 
@@ -114,14 +124,18 @@ def build_catalog(price_items):
         if not is_valid_price_item(item):
             continue
 
-        catalog.append({
+        entry = {
             "catalog_index": len(catalog),
             "original_index": original_index,
             "name": str(item["name"]),
             "category": str(item["category"]),
             "unit": str(item["unit"]),
             "price": float(item["price"]),
-        })
+        }
+        for key in CATALOG_DETAIL_KEYS:
+            if item.get(key) not in (None, ""):
+                entry[key] = item[key]
+        catalog.append(entry)
 
     return catalog
 
@@ -176,6 +190,10 @@ CRITICAL RULES:
     "Drawing: Compact juodas; catalog: LMDP negro FENIX".
     Be honest: use "partial" or "mismatch" when the chosen row differs on
     that aspect, even though you chose it.
+17. Catalog rows may include material_type, component_type, brand_model,
+    thickness_mm, keywords and synonyms (often Lithuanian and English names
+    for the same thing). Use them to recognise what a catalog row is, but
+    rules 3-13 still apply.
 
 The human will be able to override the selected catalog item afterwards.
 """
@@ -242,11 +260,9 @@ def match_parts_to_catalog(
 
     for item in catalog:
         catalog_payload.append({
-            "catalog_index": item["catalog_index"],
-            "name": item["name"],
-            "category": item["category"],
-            "unit": item["unit"],
-            "price": item["price"],
+            key: value
+            for key, value in item.items()
+            if key != "original_index"
         })
 
     catalog_index_by_key = {
@@ -815,7 +831,9 @@ def check_thickness(
         ai_part.get("thickness_mm")
     )
 
-    item_thickness = catalog_thickness_mm(
+    item_thickness = plausible_thickness(
+        price_item.get("thickness_mm")
+    ) or catalog_thickness_mm(
         price_item.get("name")
     )
 

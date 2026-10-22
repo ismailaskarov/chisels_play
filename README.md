@@ -104,6 +104,8 @@ Human catalog choices can be stored as matching feedback so future similar parts
 
 The project supports local feedback storage and can use Supabase when configured. For deployed applications, persistent database storage is preferred over relying on Streamlit's local filesystem.
 
+Learned corrections are reviewed on the **Admin** page (see "Admin page" below), where wrong ones can be deleted.
+
 ### Market price check
 
 The estimator can run a market-price comparison for a component.
@@ -122,7 +124,7 @@ It can:
 - flag suspicious/unusual offers;
 - allow a market price to be used for the current estimate when appropriate.
 
-Market results are **never automatically added to the catalog**. For an unmatched component, the estimator can choose a specific real market offer, tick **Add to catalog** for the offers worth keeping, and then click **Save ticked offers to catalog**. Nothing is saved until that button is clicked, so changing the category or other choices beforehand does not create extra catalog items. The actual selected offer is saved; the market average is not saved as a catalog product.
+Market results are **never automatically added to the catalog**. For an unmatched component, the estimator can choose a specific real market offer, tick **Add to catalog** for the offers worth keeping, and then click **Send ticked offers for catalog approval**. Nothing is saved until that button is clicked, so changing the category or other choices beforehand does not create extra catalog items. The actual selected offer is saved; the market average is not saved as a catalog product.
 
 Every **Check market prices** / **Search again** starts with a fresh offers table. Ticks from a previous search are cleared, so a tick can never move to a different offer when the new search returns offers in another order.
 
@@ -135,7 +137,7 @@ When no suitable catalog item exists, the UI stays intentionally simple. The est
 
 If neither action is chosen, the part simply remains unresolved and is not included in the estimate. There is no separate Ignore or Leave unresolved button.
 
-For market results, each real offer can be selected for the estimate (**Use**) and can independently be ticked **Add to catalog**; ticked offers are saved with the **Save ticked offers to catalog** button. The market average remains reference information only.
+For market results, each real offer can be selected for the estimate (**Use**) and can independently be ticked **Add to catalog**; ticked offers are sent for admin approval with the **Send ticked offers for catalog approval** button. The market average remains reference information only.
 
 When a new drawing is analysed or **Clear product** is clicked, all NO MATCH choices, custom-item fields and market selections from the previous drawing are cleared, so they can never carry over into a new estimate.
 
@@ -150,7 +152,9 @@ Fields include:
 - unit;
 - unit price.
 
-A custom item always works in the current estimate. To keep it for future estimates, the estimator clicks **Save to catalog for future estimates**. The item is saved once, with the name, category, unit and price shown at the moment of clicking; typing in the fields does not save anything.
+A custom item always works in the current estimate. To keep it for future estimates, the estimator clicks **Send to catalog for approval**. The item is saved once, with the name, category, unit and price shown at the moment of clicking; typing in the fields does not save anything.
+
+Items sent by estimators (custom items and market offers) are saved as **pending** (`approved = false`). A pending item is not used in future estimates until an admin approves it on the Admin page. The part's name, material type and component type are saved with it automatically, and market offers also keep the supplier, product link, thickness and whether the offer was an exact or similar match (in notes).
 
 Saved catalog additions are stored:
 
@@ -163,7 +167,7 @@ data/catalog_additions.json
 
 If Supabase is configured but temporarily unavailable, the item is saved to the local file instead.
 
-Duplicate protection compares name, category and unit while ignoring upper/lower case, spacing, punctuation and Lithuanian letters (for example `Lukštas ąžuolo` and `Lukstas azuolo` count as the same item). Saving the same item twice shows **Already in catalog** instead of creating a copy.
+Duplicate protection compares name, category and unit while ignoring upper/lower case, spacing, punctuation and Lithuanian letters (for example `Lukštas ąžuolo` and `Lukstas azuolo` count as the same item). Sending the same item twice shows **Already in catalog** or **Already waiting for admin approval** instead of creating a copy. An item an admin disabled is not added again.
 
 The local file is protected against data loss:
 
@@ -175,6 +179,30 @@ The local file is protected against data loss:
 The original `data/prices.xlsx` workbook is intentionally not rewritten from the Streamlit UI. On every rerun the application merges approved additions with the base catalog. This reduces the risk of corrupting the pricing workbook.
 
 > On Streamlit Cloud, local filesystem writes are not durable across redeploys/restarts. Configure Supabase so catalog additions and learned corrections are kept permanently.
+
+### Admin page
+
+The **Admin** page appears in the sidebar. It is protected by the `ADMIN_PASSWORD` secret; without that secret the page stays locked. The admin enters their name in the sidebar, and it is recorded as `approved_by` when an item is approved.
+
+**Setup (shown until done):**
+
+- **Import price list from prices.xlsx** - copies every row of `data/prices.xlsx` (with material type, component type, brand/model, thickness, keywords, synonyms, description, allowed use, needs-review flag and notes) into the catalog store, marked as approved price-list items. Repeated rows (for example `Kabykla` / `kabykla`) are imported once. From then on the catalog store is the **live catalog** and `prices.xlsx` is only a backup; category coefficients and the project multiplier are still read from `prices.xlsx`.
+- **Copy learned corrections to Supabase** - copies corrections that exist only in `data/match_feedback.json`. Corrections already in Supabase are never overwritten. Once Supabase is configured, learned corrections are read only from Supabase, so a deleted correction cannot come back from the file in the repository.
+
+Tabs:
+
+- **Pending approval** - items sent by estimators. The admin can correct any field and then **Approve**, or **Reject and delete**.
+- **Catalog** - every approved item (price list and items added in the app): search, filter by source and status, **Add item** (added as approved), edit any field, disable/enable and delete (with confirmation). Disabled items are kept but not used in estimates.
+- **Import / export Excel** - **Download catalog as Excel** creates a file in the same format as `prices.xlsx` (All_Items, Categories, Global_Settings). **Import** reads an uploaded Excel file, shows how many rows are new, changed or invalid before anything is saved, then adds new items and updates changed ones (matched by name, category and unit). Import never deletes items.
+- **Learned corrections** - the saved matching corrections, with CSV download and deletion of wrong ones.
+
+Adding, approving and importing require the admin's name in the sidebar; it is saved as `approved_by`.
+
+Approved changes are used by the estimator page on its next rerun (the estimator page keeps the catalog for at most 5 minutes; every admin change refreshes it immediately).
+
+The AI matcher receives each catalog item's material type, component type, brand/model, thickness, keywords and synonyms in addition to name, category, unit and price, so Lithuanian and English names of the same item are recognised.
+
+When sending an item for approval, the estimator can optionally add a brand/model (custom items) and notes for the admin.
 
 ### Needs Review
 
@@ -370,13 +398,16 @@ chisels_play/
 ├── quote_generator.py
 ├── requirements.txt
 ├── packages.txt             # system packages for Streamlit Cloud (PDF font)
+├── supabase_schema.sql      # Supabase tables (run once in the SQL editor)
+├── pages/
+│   └── Admin.py             # admin page: approvals, catalog, learned corrections
 ├── README.md
 ├── .env                     # local only - never commit
 ├── .gitignore
 └── data/
     ├── logo.jpg
     ├── prices.xlsx
-    ├── catalog_additions.json  # estimator-approved catalog additions
+    ├── catalog_additions.json  # catalog additions when Supabase is not configured
     └── match_feedback.json     # local fallback when used
 ```
 
@@ -402,7 +433,13 @@ Responsible for:
 - learned-correction management UI.
 
 #### `catalog_store.py`
-Stores estimator-approved custom items and selected market offers in Supabase (table `catalog_items`) when configured, otherwise in `data/catalog_additions.json`. Prevents duplicates, protects the local file against data loss, and keeps catalog persistence separate from the UI.
+Stores custom items and selected market offers sent by estimators in Supabase (table `catalog_items`) when configured, otherwise in `data/catalog_additions.json`. New items are pending until approved; only approved, active items are used in estimates. Also provides the approve, edit, disable and delete operations used by the Admin page. Prevents duplicates, protects the local file against data loss, and keeps catalog persistence separate from the UI.
+
+#### `pages/Admin.py`
+Password-protected admin page: pending approvals, catalog additions and learned corrections.
+
+#### `supabase_schema.sql`
+Creates the `catalog_items` and `match_feedback` tables in Supabase.
 
 #### `packages.txt`
 System packages installed by Streamlit Cloud. Currently `fonts-dejavu-core`, needed for Lithuanian letters in the quotation PDF.
@@ -411,13 +448,13 @@ System packages installed by Streamlit Cloud. Currently `fonts-dejavu-core`, nee
 Extracts furniture/component information from uploaded PDFs/images using OpenAI and applies deterministic hinge post-processing.
 
 #### `component_matcher.py`
-Matches extracted parts against the price catalog and calculates quantities based on unit/component information.
+Matches extracted parts against the price catalog (including each item's material type, component type, brand/model, thickness, keywords and synonyms) and calculates quantities based on unit/component information.
 
 #### `calculator.py`
 Performs the deterministic project-price calculation.
 
 #### `price_reader.py`
-Reads the company Excel pricing workbook.
+Reads the company Excel pricing workbook. Columns of the All_Items sheet are read by their header names, so the extra item details (material type, brand/model, keywords, synonyms and so on) are used, and the same reader is used for Excel imports on the Admin page.
 
 #### `market_prices.py`
 Performs external market-price checks and normalizes/comparers offers for estimator reference.
@@ -486,34 +523,22 @@ __pycache__/
 
 If persistent learned corrections are configured through Supabase, keep those credentials in environment variables/secrets as well rather than source code.
 
-### Persistent storage (Supabase)
+### Persistent storage (Supabase) and admin password
 
-Add these to Streamlit secrets (or environment variables):
+1. Create a project at supabase.com.
+2. Open **SQL Editor**, paste the contents of `supabase_schema.sql` and click **Run**. This creates the tables `catalog_items` and `match_feedback` and turns on Row Level Security, so the tables cannot be read or changed from outside with the public key.
+3. Open **Project Settings → API Keys** and copy the project URL and a **secret** key (`sb_secret_...`). The legacy `service_role` key also works. Never use the secret key in browser code and never commit it.
+4. Add these to the Streamlit secrets (or environment variables):
 
 ```text
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your_key
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_KEY = "sb_secret_..."
+ADMIN_PASSWORD = "choose-a-strong-password"
 ```
 
-When both are set, learned corrections and catalog additions are stored in Supabase and survive restarts and redeploys. Create the tables once in the Supabase SQL editor:
+When `SUPABASE_URL` and `SUPABASE_KEY` are set, learned corrections and catalog additions are stored in Supabase and survive restarts and redeploys. Catalog rows with `active = false` or `approved = false` are not used in estimates.
 
-```sql
-create table if not exists match_feedback (
-    source_key text primary key, source_name text, source_material text,
-    component_type text, catalog_name text, catalog_category text,
-    catalog_unit text, catalog_price double precision, ai_catalog_name text,
-    times_chosen integer default 1, created_at timestamptz, updated_at timestamptz
-);
-
-create table if not exists catalog_items (
-    id text primary key, name text, category text, unit text,
-    price double precision, source text, source_url text, source_type text,
-    thickness_mm double precision, market_match text, active boolean default true,
-    created_at timestamptz, updated_at timestamptz
-);
-```
-
-Catalog rows with `active = false` are ignored by the application.
+`catalog_items` columns: `id`, `name`, `category`, `unit`, `price`, `source_type`, `source_url`, `material_type`, `component_type`, `thickness_mm`, `brand_model`, `added_for_part`, `active`, `created_at`, `updated_at`, `supplier`, `created_by`, `approved`, `approved_by`, `approved_at`, `notes`. `created_by` stays empty until user logins are added.
 
 For Streamlit Cloud, configure secrets in the deployment environment rather than uploading `.env` to GitHub.
 
@@ -598,7 +623,8 @@ Confirm warnings do **not** block quotation generation.
 - review offers and units;
 - verify catalog-vs-market comparison;
 - verify a large difference can create a review warning;
-- confirm market data is saved only when the estimator ticks Add to catalog and clicks Save ticked offers to catalog;
+- confirm market data is saved only when the estimator ticks Add to catalog and clicks Send ticked offers for catalog approval;
+- confirm a sent item is not offered in the price list until an admin approves it on the Admin page;
 - change the category after ticking and confirm only one item (with the final category) is saved;
 - confirm the selected real offer is saved, not the market average;
 - tick an offer, click Search again, and confirm the tick is cleared rather than moved to another offer.
@@ -685,14 +711,14 @@ The following are intentionally not part of the current update:
 - quantity override;
 - quantity-calculation explanation UI;
 - catalog price-age tracking;
-- full catalog editing/admin panel;
-- persistent approval workflow for catalog additions;
+- editing category coefficients and the project multiplier from the Admin page (they are still read from `prices.xlsx`);
+- user logins and roles (the Admin page uses one shared password for now; `created_by` is not filled yet);
 - client authentication/portal;
 - project history/database;
 - approval workflow;
 - automatic quote sending.
 
-Custom items are project-use items by default; only explicitly approved items are added to the catalog additions store.
+Custom items are project-use items by default; items sent to the catalog are used in future estimates only after an admin approves them.
 
 The ready-to-quote check is deliberately warning-only during testing.
 

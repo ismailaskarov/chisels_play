@@ -1,5 +1,3 @@
-import csv
-import io
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -9,10 +7,7 @@ from calculator import calculate_project
 from price_reader import read_price_data
 from pdf_extractor import extract_furniture
 from feedback_store import (
-    delete_match_feedback,
-    feedback_storage_name,
     load_match_feedback,
-    record_votes,
     remove_match_vote,
     save_match_feedback,
 )
@@ -28,7 +23,8 @@ from market_prices import search_market_prices
 from catalog_store import (
     add_catalog_item,
     catalog_item_exists,
-    load_catalog_additions,
+    catalog_item_status,
+    load_live_catalog,
 )
 from quote_generator import (
     build_quote_pdf,
@@ -69,17 +65,15 @@ def load_data():
 
 price_data = load_data()
 
-all_items = list(price_data[
+
+@st.cache_data(ttl=300)
+def load_catalog(base_items):
+    return load_live_catalog(base_items)
+
+
+all_items = load_catalog(price_data[
     "items"
 ])
-
-# Estimator-approved additions are kept separate from the source workbook.
-# This protects prices.xlsx while making saved items available immediately
-# on the next Streamlit rerun.
-catalog_additions = load_catalog_additions()
-for catalog_item in catalog_additions:
-    if not catalog_item_exists(all_items, catalog_item):
-        all_items.append(catalog_item)
 
 markups = price_data[
     "markups"
@@ -573,6 +567,29 @@ def market_price_warning(
     )
 
 
+def save_catalog_candidate(candidate):
+    if catalog_item_exists(all_items, candidate):
+        st.info(f'Already in catalog: {candidate["name"]}')
+        return
+    try:
+        created, existing = add_catalog_item(candidate)
+    except Exception as error:
+        st.error(f'Could not send {candidate["name"]} for approval: {error}')
+        return
+    status = catalog_item_status(existing)
+    if created:
+        st.success(
+            f'Sent to admin for approval: {candidate["name"]}. '
+            "It will be used in future estimates once approved."
+        )
+    elif status == "pending":
+        st.info(f'Already waiting for admin approval: {candidate["name"]}')
+    elif status == "disabled":
+        st.warning(f'{candidate["name"]} was disabled by an admin, so it was not added again.')
+    else:
+        st.info(f'Already in catalog: {candidate["name"]}')
+
+
 def show_market_check(
     match,
     ai_part,
@@ -847,33 +864,34 @@ def show_market_check(
             return None
 
         rows_to_save = [row for row in edited_rows if row.get("Add to catalog")]
+        market_notes = st.text_input(
+            "Notes for the admin (optional)",
+            key=f"market_notes_{part_index}",
+        ) if rows_to_save else ""
         save_offers = bool(rows_to_save) and st.button(
-            "Save ticked offers to catalog",
+            "Send ticked offers for catalog approval",
             key=f"market_save_catalog_{part_index}",
         )
 
         for row in rows_to_save if save_offers else []:
             offer = offers[int(row["_offer_index"])]
-            candidate = {
+            save_catalog_candidate({
                 "name": offer.get("product_name") or ai_part.get("name") or "Market item",
                 "category": category,
                 "unit": unit,
                 "price": float(offer["price_excl_vat_per_unit"]),
-                "source": offer.get("shop") or "Market search",
+                "supplier": offer.get("shop") or "Market search",
                 "source_url": offer.get("url") or "",
                 "source_type": "market",
                 "thickness_mm": offer.get("thickness"),
-                "market_match": offer.get("match") or "",
-            }
-            if catalog_item_exists(all_items, candidate):
-                st.info(f'Already in catalog: {candidate["name"]}')
-            else:
-                try:
-                    created, _ = add_catalog_item(candidate)
-                    if created:
-                        st.success(f'Added to catalog: {candidate["name"]}')
-                except Exception as error:
-                    st.error(f"Could not add this market item to the catalog: {error}")
+                "material_type": ai_part.get("material"),
+                "component_type": ai_part.get("component_type"),
+                "added_for_part": ai_part.get("name"),
+                "notes": " ".join(filter(None, [
+                    f'Market match: {offer["match"]}.' if offer.get("match") else "",
+                    market_notes.strip(),
+                ])),
+            })
 
         if not selected_rows:
             return None
@@ -1760,26 +1778,31 @@ if matches:
                     "custom": True,
                 }
 
+                c1, c2 = st.columns(2)
+                with c1:
+                    custom_brand = st.text_input(
+                        "Brand / model (optional, for the catalog)",
+                        key=f"custom_brand_{part_index}",
+                    )
+                with c2:
+                    custom_notes = st.text_input(
+                        "Notes for the admin (optional)",
+                        key=f"custom_notes_{part_index}",
+                    )
+
                 if st.button(
-                    "Save to catalog for future estimates",
+                    "Send to catalog for approval",
                     key=f"custom_save_catalog_{part_index}",
                 ):
-                    if catalog_item_exists(all_items, selected_item):
-                        st.info(f'Already in catalog: {selected_item["name"]}')
-                    else:
-                        try:
-                            created, _ = add_catalog_item({
-                                **selected_item,
-                                "source": "Estimator custom item",
-                                "source_type": "custom",
-                            })
-                            if created:
-                                st.success(
-                                    f'Added to catalog for future estimates: '
-                                    f'{selected_item["name"]}'
-                                )
-                        except Exception as error:
-                            st.error(f"Could not add the custom item to the catalog: {error}")
+                    save_catalog_candidate({
+                        **selected_item,
+                        "brand_model": custom_brand,
+                        "notes": custom_notes,
+                        "source_type": "custom",
+                        "material_type": ai_part.get("material"),
+                        "component_type": ai_part.get("component_type"),
+                        "added_for_part": ai_part.get("name"),
+                    })
 
                 st.caption(
                     "The custom item is included in this estimate. "
@@ -3124,182 +3147,6 @@ if st.session_state[
             ),
             mime="application/pdf",
             key="download_quote_button",
-        )
-
-
-def delete_selected_corrections():
-    for source_key in (
-        st.session_state.get(
-            "feedback_delete_select"
-        )
-        or []
-    ):
-
-        delete_match_feedback(
-            source_key
-        )
-
-    st.session_state[
-        "feedback_delete_select"
-    ] = []
-
-
-st.divider()
-
-st.subheader(
-    "Learned corrections"
-)
-
-
-if st.toggle(
-    "Show learned corrections",
-    key="show_learned_corrections",
-):
-
-    if (
-        feedback_storage_name()
-        == "Supabase"
-    ):
-
-        st.caption(
-            "Stored in Supabase: shared by "
-            "all users and kept permanently."
-        )
-
-    else:
-
-        st.warning(
-            "Stored in a local file on the "
-            "server. On Streamlit Cloud it is "
-            "lost when the app restarts. Set "
-            "up Supabase to keep it."
-        )
-
-
-    corrections = sorted(
-        [
-            record
-            for record in (
-                load_match_feedback()
-            )
-            if record_votes(record) > 0
-        ],
-        key=lambda record: str(
-            record.get("updated_at")
-            or ""
-        ),
-        reverse=True,
-    )
-
-
-    if not corrections:
-
-        st.info(
-            "No corrections saved yet."
-        )
-
-    else:
-
-        correction_rows = [
-            {
-                "Part": record.get(
-                    "source_name"
-                ),
-                "Material": record.get(
-                    "source_material"
-                ),
-                "Type": record.get(
-                    "component_type"
-                ),
-                "Chosen item": record.get(
-                    "catalog_name"
-                ),
-                "Category": record.get(
-                    "catalog_category"
-                ),
-                "Unit": record.get(
-                    "catalog_unit"
-                ),
-                "AI suggested": (
-                    record.get(
-                        "ai_catalog_name"
-                    )
-                    or "-"
-                ),
-                "Times chosen": record_votes(
-                    record
-                ),
-                "Last chosen": str(
-                    record.get("updated_at")
-                    or ""
-                )[:10],
-            }
-            for record in corrections
-        ]
-
-
-        st.dataframe(
-            correction_rows,
-            hide_index=True,
-        )
-
-
-        csv_buffer = io.StringIO()
-
-        writer = csv.DictWriter(
-            csv_buffer,
-            fieldnames=list(
-                correction_rows[0].keys()
-            ),
-        )
-
-        writer.writeheader()
-
-        writer.writerows(
-            correction_rows
-        )
-
-        st.download_button(
-            "Download CSV",
-            data=(
-                csv_buffer
-                .getvalue()
-                .encode("utf-8-sig")
-            ),
-            file_name=(
-                "learned_corrections.csv"
-            ),
-            mime="text/csv",
-        )
-
-
-        corrections_by_key = {
-            record["source_key"]: record
-            for record in corrections
-        }
-
-        selected_for_delete = (
-            st.multiselect(
-                "Wrong corrections to delete",
-                list(
-                    corrections_by_key.keys()
-                ),
-                format_func=(
-                    lambda source_key:
-                    (
-                        f'{corrections_by_key[source_key].get("source_name")} '
-                        f'→ {corrections_by_key[source_key].get("catalog_name")} '
-                        f'({record_votes(corrections_by_key[source_key])}×)'
-                    )
-                ),
-                key="feedback_delete_select",
-            )
-        )
-
-        st.button(
-            "Delete selected",
-            disabled=not selected_for_delete,
-            on_click=delete_selected_corrections,
         )
 
 
