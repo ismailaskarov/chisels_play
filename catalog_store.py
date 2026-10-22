@@ -11,7 +11,13 @@ from tempfile import NamedTemporaryFile
 import requests
 from openpyxl import Workbook
 
-from feedback_store import get_supabase_config, normalize_text, supabase_headers
+from feedback_store import (
+    get_supabase_config,
+    normalize_text,
+    relink_feedback,
+    supabase_get_all,
+    supabase_headers,
+)
 
 
 DEFAULT_CATALOG_ADDITIONS = Path(__file__).resolve().parent / "data" / "catalog_additions.json"
@@ -222,14 +228,7 @@ def _row(item):
 
 
 def _load_supabase_items(url, key):
-    response = requests.get(
-        f"{url}/rest/v1/{SUPABASE_TABLE}",
-        headers=supabase_headers(key),
-        params={"select": "*", "order": "created_at.asc"},
-        timeout=15,
-    )
-    response.raise_for_status()
-    return response.json()
+    return supabase_get_all(url, key, SUPABASE_TABLE, "created_at.asc,id.asc")
 
 
 def _add_supabase_items(items, url, key):
@@ -339,8 +338,8 @@ def price_list_imported(items):
     return any(item.get("source_type") == PRICE_LIST_SOURCE for item in items)
 
 
-def load_live_catalog(base_items, path=DEFAULT_CATALOG_ADDITIONS):
-    stored = list_catalog_items(path)
+def load_live_catalog(base_items, path=DEFAULT_CATALOG_ADDITIONS, raise_errors=False):
+    stored = list_catalog_items(path, raise_errors=raise_errors)
     usable = [item for item in stored if item["active"] and item["approved"]]
 
     if price_list_imported(stored):
@@ -404,20 +403,24 @@ def add_catalog_item(item, path=DEFAULT_CATALOG_ADDITIONS, approved=False, appro
     clean_item = _new_item(item, approved, approved_by)
     identity = _identity(clean_item)
 
-    for existing in list_catalog_items(path, raise_errors=approved):
+    url, key = get_supabase_config()
+    try:
+        existing_items = list_catalog_items(path, raise_errors=True)
+    except Exception as error:
+        raise RuntimeError("The catalog database could not be reached, so nothing was saved. Please try again.") from error
+
+    for existing in existing_items:
         if _identity(existing) == identity:
             return False, existing
 
-    url, key = get_supabase_config()
     if url and key:
         try:
             _add_supabase_items([clean_item], url, key)
-            print("Added catalog item to Supabase:", clean_item["name"])
-            return True, _clean_item(clean_item, "Supabase")
         except Exception as error:
-            if approved:
-                raise
-            print("Supabase catalog save failed, saving locally:", error)
+            print("Supabase catalog save failed:", error)
+            raise RuntimeError("The catalog database could not be reached, so nothing was saved. Please try again.") from error
+        print("Added catalog item to Supabase:", clean_item["name"])
+        return True, _clean_item(clean_item, "Supabase")
 
     with _file_lock:
         items = _read_raw_items(path)
@@ -465,7 +468,16 @@ def update_catalog_item(item, changes, path=DEFAULT_CATALOG_ADDITIONS):
             raise ValueError("Another catalog item already has this name, category and unit.")
 
     _apply_changes(item, changes, path)
-    return {**item, **changes}
+    updated = {**item, **changes}
+
+    try:
+        relink_feedback(item, updated)
+    except Exception as error:
+        raise RuntimeError(
+            f"The item was saved, but its learned corrections could not be moved to the new name: {error}"
+        ) from error
+
+    return updated
 
 
 def approve_catalog_item(item, approved_by, changes=None, path=DEFAULT_CATALOG_ADDITIONS):

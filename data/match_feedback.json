@@ -1,19 +1,5 @@
 [
   {
-    "source_key": "44097b17ee21d8fbca0aadbadedb9526a2d4faa3ec293d60c9c8c168db32072c",
-    "source_name": "Montavimas",
-    "source_material": "Service",
-    "component_type": "service",
-    "catalog_name": "4mm nerudijancio plieno lakstas",
-    "catalog_category": "METAL",
-    "catalog_unit": "m2",
-    "catalog_price": 85.0,
-    "ai_catalog_name": "NO MATCH",
-    "times_chosen": 1,
-    "created_at": "2026-10-20T16:40:44.669986+00:00",
-    "updated_at": "2026-10-20T16:40:44.669986+00:00"
-  },
-  {
     "source_key": "80bfb3ce743743634924988bdeefb6e7fe954a04df939c212746531cf07d2c06",
     "source_name": "Left desk support panel",
     "source_material": "not specified; 2mm NP surface covering",

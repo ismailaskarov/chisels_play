@@ -47,6 +47,10 @@ st.set_page_config(
     layout="wide",
 )
 
+with st.sidebar:
+    st.page_link("app.py", label="Calculator")
+    st.page_link("pages/Admin.py", label="Admin")
+
 
 # --------------------------------------------------
 # LOAD PRICING
@@ -68,12 +72,23 @@ price_data = load_data()
 
 @st.cache_data(ttl=300)
 def load_catalog(base_items):
-    return load_live_catalog(base_items)
+    return load_live_catalog(base_items, raise_errors=True)
 
 
-all_items = load_catalog(price_data[
-    "items"
-])
+try:
+    all_items = load_catalog(price_data[
+        "items"
+    ])
+except Exception as error:
+    print("CATALOG LOAD ERROR:", repr(error))
+    st.warning(
+        "The catalog database could not be reached, so prices may be out of date: "
+        "admin changes and newly approved items are missing until it is back. "
+        "Reload the page in a minute before preparing a quotation."
+    )
+    all_items = load_live_catalog(price_data[
+        "items"
+    ])
 
 markups = price_data[
     "markups"

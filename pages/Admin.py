@@ -2,6 +2,7 @@ import csv
 import hmac
 import io
 import os
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -22,6 +23,7 @@ from component_matcher import normalize_unit
 from feedback_store import (
     copy_local_feedback_to_supabase,
     delete_match_feedback,
+    feedback_for_item,
     feedback_storage_name,
     load_match_feedback,
     local_feedback_missing_from_supabase,
@@ -32,6 +34,8 @@ from price_reader import read_catalog_rows, read_price_data
 
 
 PRICE_FILE = Path("data") / "prices.xlsx"
+MAX_PASSWORD_ATTEMPTS = 5
+LOCKOUT_SECONDS = 300
 BASE_UNITS = ["pcs", "set", "m", "m2", "hour"]
 SEARCH_KEYS = ("name", "category", "supplier", "brand_model", "keywords", "synonyms", "notes", "material_type")
 
@@ -40,6 +44,10 @@ st.set_page_config(
     page_title="Admin · Chisels Play",
     layout="wide",
 )
+
+with st.sidebar:
+    st.page_link("app.py", label="Calculator")
+    st.page_link("pages/Admin.py", label="Admin")
 
 
 def admin_password():
@@ -179,13 +187,25 @@ if not password:
     st.stop()
 
 if not st.session_state.get("admin_signed_in"):
+    locked_for = st.session_state.get("admin_locked_until", 0) - time.time()
+    if locked_for > 0:
+        st.error(f"Too many wrong passwords. Try again in {int(locked_for // 60) + 1} minute(s).")
+        st.stop()
     entered = st.text_input("Admin password", type="password", key="admin_password_input")
     if st.button("Sign in"):
         if hmac.compare_digest(entered.encode("utf-8"), str(password).encode("utf-8")):
             st.session_state["admin_signed_in"] = True
+            st.session_state["admin_failed_attempts"] = 0
             st.session_state.pop("admin_password_input", None)
             st.rerun()
-        st.error("Wrong password.")
+        time.sleep(1)
+        attempts = st.session_state.get("admin_failed_attempts", 0) + 1
+        st.session_state["admin_failed_attempts"] = attempts
+        if attempts >= MAX_PASSWORD_ATTEMPTS:
+            st.session_state["admin_failed_attempts"] = 0
+            st.session_state["admin_locked_until"] = time.time() + LOCKOUT_SECONDS
+            st.rerun()
+        st.error(f"Wrong password ({MAX_PASSWORD_ATTEMPTS - attempts} tries left).")
     st.stop()
 
 with st.sidebar:
@@ -225,6 +245,12 @@ units = sorted(
 )
 
 imported = price_list_imported(catalog_items)
+
+try:
+    all_feedback = load_match_feedback()
+except Exception as error:
+    all_feedback = []
+    st.error(f"Could not load learned corrections: {error}")
 
 try:
     missing_corrections = local_feedback_missing_from_supabase()
@@ -384,6 +410,12 @@ with catalog_tab:
         )
         selected = items_by_id[selected_id]
         item_details(selected)
+        linked_corrections = feedback_for_item(selected, all_feedback)
+        if linked_corrections:
+            st.caption(
+                f"Used by {len(linked_corrections)} learned correction(s). Renaming the item or changing "
+                "its category or unit moves them to the new name automatically."
+            )
 
         with st.form(f"catalog_form_{selected_id}"):
             values = item_fields(selected, f"catalog_{selected_id}", categories, units)
@@ -403,6 +435,11 @@ with catalog_tab:
                 )
             st.caption("Disabled items are kept but not used in estimates.")
         with delete_col:
+            if linked_corrections:
+                st.warning(
+                    f"{len(linked_corrections)} learned correction(s) point to this item. After deleting it they "
+                    "will be ignored. Disabling is usually safer."
+                )
             confirm = st.checkbox(
                 "I want to delete this item permanently",
                 key=f"catalog_delete_confirm_{selected_id}",
@@ -477,7 +514,7 @@ with corrections_tab:
         )
 
     corrections = sorted(
-        [record for record in load_match_feedback() if record_votes(record) > 0],
+        [record for record in all_feedback if record_votes(record) > 0],
         key=lambda record: str(record.get("updated_at") or ""),
         reverse=True,
     )

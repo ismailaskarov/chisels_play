@@ -287,12 +287,24 @@ def vote_supabase(source_key, new_record, delta, url, key):
     return record
 
 
+def supabase_get_all(url, key, table, order, page_size=1000):
+    rows = []
+    while True:
+        response = requests.get(
+            f"{url}/rest/v1/{table}",
+            headers=supabase_headers(key),
+            params={"select": "*", "order": order, "limit": page_size, "offset": len(rows)},
+            timeout=15,
+        )
+        response.raise_for_status()
+        page = response.json()
+        rows.extend(page)
+        if len(page) < page_size:
+            return rows
+
+
 def load_supabase_feedback(url, key):
-    response = requests.get(
-        f"{url}/rest/v1/match_feedback?select=*", headers=supabase_headers(key), timeout=15
-    )
-    response.raise_for_status()
-    return response.json()
+    return supabase_get_all(url, key, "match_feedback", "source_key.asc")
 
 
 def vote(source_key, new_record, delta):
@@ -419,6 +431,88 @@ def copy_local_feedback_to_supabase(records):
         )
         response.raise_for_status()
     return len(rows)
+
+
+def feedback_for_item(item, feedback):
+    wanted = item_catalog_key(item)
+    return [
+        record
+        for record in feedback
+        if record_catalog_key(record) == wanted and record_votes(record) > 0
+    ]
+
+
+def _relinked_records(records, old_item, new_item):
+    old_key = item_catalog_key(old_item)
+    by_key = {record.get("source_key"): dict(record) for record in records}
+    changed = {}
+    removed = []
+    for record in records:
+        if record_catalog_key(record) != old_key:
+            continue
+        part = {
+            "name": record.get("source_name"),
+            "material": record.get("source_material"),
+            "component_type": record.get("component_type"),
+        }
+        new_key = make_source_key(part, new_item)
+        target = changed.get(new_key) or by_key.get(new_key)
+        if target is not None and new_key != record.get("source_key"):
+            target = dict(target)
+            target["times_chosen"] = record_votes(target) + record_votes(record)
+            target["updated_at"] = max(str(target.get("updated_at") or ""), str(record.get("updated_at") or ""))
+        else:
+            target = dict(record)
+        target["created_at"] = target.get("created_at") or now_iso()
+        target["updated_at"] = target.get("updated_at") or target["created_at"]
+        target.update({
+            "source_key": new_key,
+            "catalog_name": str(new_item.get("name") or ""),
+            "catalog_category": str(new_item.get("category") or ""),
+            "catalog_unit": str(new_item.get("unit") or ""),
+            "catalog_price": float(new_item.get("price") or 0),
+        })
+        changed[new_key] = target
+        if record.get("source_key") != new_key:
+            removed.append(record.get("source_key"))
+    return list(changed.values()), removed
+
+
+def relink_feedback(old_item, new_item):
+    if item_catalog_key(old_item) == item_catalog_key(new_item):
+        return 0
+
+    url, key = get_supabase_config()
+    if url and key:
+        changed, removed = _relinked_records(load_supabase_feedback(url, key), old_item, new_item)
+        if changed:
+            headers = supabase_headers(key)
+            headers["Prefer"] = "resolution=merge-duplicates"
+            response = requests.post(
+                f"{url}/rest/v1/match_feedback?on_conflict=source_key",
+                headers=headers,
+                json=[{column: record.get(column) for column in FEEDBACK_COLUMNS} for record in changed],
+                timeout=30,
+            )
+            response.raise_for_status()
+        for source_key in removed:
+            response = requests.delete(
+                f"{url}/rest/v1/match_feedback",
+                headers=supabase_headers(key),
+                params={"source_key": f"eq.{source_key}"},
+                timeout=15,
+            )
+            response.raise_for_status()
+        return len(changed)
+
+    with _local_file_lock:
+        records = records_for_update()
+        changed, removed = _relinked_records(records, old_item, new_item)
+        if not changed:
+            return 0
+        replaced = set(removed) | {record["source_key"] for record in changed}
+        write_local_feedback([r for r in records if r.get("source_key") not in replaced] + changed)
+    return len(changed)
 
 
 def feedback_storage_name():

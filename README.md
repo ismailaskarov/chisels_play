@@ -198,6 +198,14 @@ Tabs:
 
 Adding, approving and importing require the admin's name in the sidebar; it is saved as `approved_by`.
 
+Learned corrections point to catalog items by name, category and unit. When an admin renames an item or changes its category or unit, its corrections are moved to the new name automatically (votes are kept, and merged if the same part already pointed to the new name). The edit area shows how many corrections use an item, and deleting such an item shows a warning, because its corrections are then ignored.
+
+After 5 wrong admin passwords the sign-in is locked for 5 minutes.
+
+The sidebar shows **Calculator** and **Admin** links; Streamlit's automatic page list is turned off in `.streamlit/config.toml` because it would label the main page "app".
+
+Supabase is read page by page (1,000 rows per request), so catalogs and learned corrections larger than 1,000 rows are loaded completely. If Supabase cannot be reached, the Calculator shows a warning and falls back to `prices.xlsx`, and sending an item for approval shows "nothing was saved, please try again" instead of saving it to a temporary file.
+
 Approved changes are used by the estimator page on its next rerun (the estimator page keeps the catalog for at most 5 minutes; every admin change refreshes it immediately).
 
 The AI matcher receives each catalog item's material type, component type, brand/model, thickness, keywords and synonyms in addition to name, category, unit and price, so Lithuanian and English names of the same item are recognised.
