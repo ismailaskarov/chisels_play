@@ -24,6 +24,12 @@ DEFAULT_CATALOG_ADDITIONS = Path(__file__).resolve().parent / "data" / "catalog_
 
 SUPABASE_TABLE = "catalog_items"
 
+SETTINGS_TABLE = "pricing_settings"
+
+DEFAULT_PRICING_SETTINGS = Path(__file__).resolve().parent / "data" / "pricing_settings.json"
+
+MULTIPLIER_SETTING = "project_multiplier"
+
 PRICE_LIST_SOURCE = "price_list"
 
 OPTIONAL_KEYS = (
@@ -611,3 +617,132 @@ def catalog_to_excel(items, markups, project_multiplier):
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()
+
+
+def list_pricing_settings(path=DEFAULT_PRICING_SETTINGS, raise_errors=False):
+    rows = {}
+
+    for raw in _read_raw_items(Path(path)) or []:
+        if isinstance(raw, dict) and raw.get("name"):
+            rows[raw["name"]] = {**raw, "storage": "local file"}
+
+    url, key = get_supabase_config()
+    if url and key:
+        try:
+            for raw in supabase_get_all(url, key, SETTINGS_TABLE, "name.asc"):
+                rows[raw["name"]] = {**raw, "storage": "Supabase"}
+        except Exception as error:
+            print("Supabase pricing settings load failed:", error)
+            if raise_errors:
+                raise
+
+    return list(rows.values())
+
+
+def load_pricing(base_markups, base_multiplier, path=DEFAULT_PRICING_SETTINGS, raise_errors=False):
+    markups = {}
+    multiplier = None
+
+    for row in list_pricing_settings(path, raise_errors=raise_errors):
+        try:
+            value = float(row.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if value <= 0:
+            continue
+        if row.get("kind") == "category":
+            markups[_clean_text(row.get("name")).lower()] = value
+        elif row.get("kind") == "multiplier":
+            multiplier = value
+
+    return {
+        "markups": markups or dict(base_markups),
+        "project_multiplier": multiplier or float(base_multiplier),
+        "stored": bool(markups),
+    }
+
+
+def save_pricing_settings(
+    categories,
+    project_multiplier,
+    updated_by,
+    in_use_categories=(),
+    path=DEFAULT_PRICING_SETTINGS,
+):
+    updated_by = _clean_text(updated_by)
+    if not updated_by:
+        raise ValueError("Enter your name before saving coefficients.")
+
+    clean = {}
+    for name, value in categories:
+        name = _clean_text(name).upper()
+        if not name:
+            raise ValueError("Every category needs a name.")
+        try:
+            value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"The coefficient for {name} must be a number.") from exc
+        if value <= 0:
+            raise ValueError(f"The coefficient for {name} must be greater than zero.")
+        if name in clean:
+            raise ValueError(f"The category {name} is listed twice.")
+        clean[name] = value
+
+    if not clean:
+        raise ValueError("At least one category is needed.")
+
+    try:
+        project_multiplier = float(project_multiplier)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("The project multiplier must be a number.") from exc
+    if project_multiplier <= 0:
+        raise ValueError("The project multiplier must be greater than zero.")
+
+    still_used = sorted(
+        {_clean_text(category).upper() for category in in_use_categories if _clean_text(category)}
+        - set(clean)
+    )
+    if still_used:
+        raise ValueError(
+            "These categories are still used by catalog items, so they cannot be removed: "
+            + ", ".join(still_used)
+        )
+
+    now = _now()
+    rows = [
+        {"name": name, "kind": "category", "value": value, "updated_by": updated_by, "updated_at": now}
+        for name, value in clean.items()
+    ]
+    rows.append({
+        "name": MULTIPLIER_SETTING,
+        "kind": "multiplier",
+        "value": project_multiplier,
+        "updated_by": updated_by,
+        "updated_at": now,
+    })
+
+    url, key = get_supabase_config()
+    if url and key:
+        existing = {row["name"] for row in supabase_get_all(url, key, SETTINGS_TABLE, "name.asc")}
+        headers = supabase_headers(key)
+        headers["Prefer"] = "resolution=merge-duplicates"
+        response = requests.post(
+            f"{url}/rest/v1/{SETTINGS_TABLE}?on_conflict=name",
+            headers=headers,
+            json=rows,
+            timeout=15,
+        )
+        response.raise_for_status()
+        for name in sorted(existing - {row["name"] for row in rows}):
+            response = requests.delete(
+                f"{url}/rest/v1/{SETTINGS_TABLE}",
+                headers=supabase_headers(key),
+                params={"name": f"eq.{name}"},
+                timeout=15,
+            )
+            response.raise_for_status()
+    else:
+        with _file_lock:
+            _write_items(Path(path), rows)
+
+    return {"markups": {name.lower(): value for name, value in clean.items()}, "project_multiplier": project_multiplier}

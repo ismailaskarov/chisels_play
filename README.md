@@ -193,12 +193,15 @@ Tabs:
 
 - **Pending approval** - items sent by estimators. The admin can correct any field and then **Approve**, or **Reject and delete**.
 - **Catalog** - every approved item (price list and items added in the app): search, filter by source and status, **Add item** (added as approved), edit any field, disable/enable and delete (with confirmation). Disabled items are kept but not used in estimates.
-- **Import / export Excel** - **Download catalog as Excel** creates a file in the same format as `prices.xlsx` (All_Items, Categories, Global_Settings). **Import** reads an uploaded Excel file, shows how many rows are new, changed or invalid before anything is saved, then adds new items and updates changed ones (matched by name, category and unit). Import never deletes items.
+- **Coefficients** - the company category coefficients (for example LMDP ×3, METAL ×5) and the default project multiplier (×1.4). The admin can change values, add a category and remove a category that no catalog item uses. Until they are saved here they are read from `prices.xlsx`; after saving they are stored in the database (`pricing_settings` table) and used by every new estimate.
+- **Import / export Excel** - **Download catalog as Excel** creates a file in the same format as `prices.xlsx` (All_Items, Categories, Global_Settings). **Import** reads an uploaded Excel file, shows how many rows are new, changed or invalid before anything is saved, then adds new items and updates changed ones (matched by name, category and unit). Import never deletes items. If the uploaded file also has Categories and Global_Settings sheets (like `prices.xlsx`), the admin sees which coefficients differ and can replace them in the same import, so the whole price file can be managed from the Admin page.
 - **Learned corrections** - the saved matching corrections, with CSV download and deletion of wrong ones.
 
 Adding, approving and importing require the admin's name in the sidebar; it is saved as `approved_by`.
 
 Learned corrections point to catalog items by name, category and unit. When an admin renames an item or changes its category or unit, its corrections are moved to the new name automatically (votes are kept, and merged if the same part already pointed to the new name). The edit area shows how many corrections use an item, and deleting such an item shows a warning, because its corrections are then ignored.
+
+In the Calculator, the box **Category coefficients for this estimate** starts from the company coefficients. An estimator can change them for the current estimate only (the totals, breakdown and quotation follow); **Reset to company coefficients**, analysing a new drawing or **Clear product** brings back the company values. The global multiplier also starts from the admin's default and can be changed per estimate.
 
 After 5 wrong admin passwords the sign-in is locked for 5 minutes.
 
@@ -447,7 +450,7 @@ Stores custom items and selected market offers sent by estimators in Supabase (t
 Password-protected admin page: pending approvals, catalog additions and learned corrections.
 
 #### `supabase_schema.sql`
-Creates the `catalog_items` and `match_feedback` tables in Supabase.
+Creates the `catalog_items`, `match_feedback` and `pricing_settings` tables in Supabase.
 
 #### `packages.txt`
 System packages installed by Streamlit Cloud. Currently `fonts-dejavu-core`, needed for Lithuanian letters in the quotation PDF.
@@ -534,7 +537,7 @@ If persistent learned corrections are configured through Supabase, keep those cr
 ### Persistent storage (Supabase) and admin password
 
 1. Create a project at supabase.com.
-2. Open **SQL Editor**, paste the contents of `supabase_schema.sql` and click **Run**. This creates the tables `catalog_items` and `match_feedback` and turns on Row Level Security, so the tables cannot be read or changed from outside with the public key.
+2. Open **SQL Editor**, paste the contents of `supabase_schema.sql` and click **Run**. This creates the tables `catalog_items`, `match_feedback` and `pricing_settings` and turns on Row Level Security, so the tables cannot be read or changed from outside with the public key.
 3. Open **Project Settings → API Keys** and copy the project URL and a **secret** key (`sb_secret_...`). The legacy `service_role` key also works. Never use the secret key in browser code and never commit it.
 4. Add these to the Streamlit secrets (or environment variables):
 
@@ -719,7 +722,6 @@ The following are intentionally not part of the current update:
 - quantity override;
 - quantity-calculation explanation UI;
 - catalog price-age tracking;
-- editing category coefficients and the project multiplier from the Admin page (they are still read from `prices.xlsx`);
 - user logins and roles (the Admin page uses one shared password for now; `created_by` is not filled yet);
 - client authentication/portal;
 - project history/database;

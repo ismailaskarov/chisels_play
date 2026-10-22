@@ -57,3 +57,15 @@ grant select, insert, update, delete on table catalog_items to service_role;
 grant select, insert, update, delete on table match_feedback to service_role;
 revoke all on table catalog_items from anon, authenticated;
 revoke all on table match_feedback from anon, authenticated;
+
+create table if not exists pricing_settings (
+    name text primary key,
+    kind text not null check (kind in ('category', 'multiplier')),
+    value double precision not null check (value > 0),
+    updated_by text,
+    updated_at timestamptz not null default now()
+);
+
+alter table pricing_settings enable row level security;
+grant select, insert, update, delete on table pricing_settings to service_role;
+revoke all on table pricing_settings from anon, authenticated;

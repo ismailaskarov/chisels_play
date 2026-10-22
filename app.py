@@ -25,6 +25,7 @@ from catalog_store import (
     catalog_item_exists,
     catalog_item_status,
     load_live_catalog,
+    load_pricing,
 )
 from quote_generator import (
     build_quote_pdf,
@@ -75,10 +76,19 @@ def load_catalog(base_items):
     return load_live_catalog(base_items, raise_errors=True)
 
 
+@st.cache_data(ttl=300)
+def load_company_pricing(base_markups, base_multiplier):
+    return load_pricing(base_markups, base_multiplier, raise_errors=True)
+
+
 try:
     all_items = load_catalog(price_data[
         "items"
     ])
+    company_pricing = load_company_pricing(
+        price_data["markups"],
+        price_data["project_multiplier"],
+    )
 except Exception as error:
     print("CATALOG LOAD ERROR:", repr(error))
     st.warning(
@@ -89,10 +99,21 @@ except Exception as error:
     all_items = load_live_catalog(price_data[
         "items"
     ])
+    company_pricing = load_pricing(
+        price_data["markups"],
+        price_data["project_multiplier"],
+    )
 
-markups = price_data[
-    "markups"
-]
+company_markups = company_pricing["markups"]
+
+markups = {
+    **company_markups,
+    **{
+        category: value
+        for category, value in st.session_state.get("estimate_coefficients", {}).items()
+        if category in company_markups
+    },
+}
 
 
 # --------------------------------------------------
@@ -357,6 +378,10 @@ def apply_ai_data(
             or
             str(key).startswith(
                 "generated_quote_"
+            )
+            or
+            str(key).startswith(
+                "estimate_coefficient"
             )
         ):
             keys_to_delete.append(
@@ -1117,6 +1142,10 @@ def clear_product():
             or
             str(key).startswith(
                 "generated_quote_"
+            )
+            or
+            str(key).startswith(
+                "estimate_coefficient"
             )
         ):
             keys_to_delete.append(
@@ -2113,6 +2142,68 @@ if matches:
 
 
 # --------------------------------------------------
+# CATEGORY COEFFICIENTS FOR THIS ESTIMATE
+# --------------------------------------------------
+
+def remember_estimate_coefficient(category):
+    value = float(st.session_state[f"estimate_coefficient_{category}"])
+    overrides = dict(st.session_state.get("estimate_coefficients", {}))
+    if value == company_markups.get(category):
+        overrides.pop(category, None)
+    else:
+        overrides[category] = value
+    st.session_state["estimate_coefficients"] = overrides
+
+
+def reset_estimate_coefficients():
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("estimate_coefficient"):
+            del st.session_state[key]
+
+
+if confirmed_items or st.session_state["items"]:
+    st.divider()
+    changed_coefficients = st.session_state.get("estimate_coefficients", {})
+    with st.expander(
+        "Category coefficients for this estimate"
+        + (f" ({len(changed_coefficients)} changed)" if changed_coefficients else ""),
+        expanded=bool(changed_coefficients),
+    ):
+        st.caption(
+            "These start from the company coefficients set in Admin. Changes here apply to "
+            "this estimate only and are reset when a new drawing is analysed or Clear product is clicked."
+        )
+        coefficient_columns = st.columns(4)
+        for column_index, (category, company_value) in enumerate(sorted(company_markups.items())):
+            with coefficient_columns[column_index % 4]:
+                st.number_input(
+                    category.upper(),
+                    min_value=0.01,
+                    value=float(markups[category]),
+                    step=0.1,
+                    format="%.2f",
+                    key=f"estimate_coefficient_{category}",
+                    on_change=remember_estimate_coefficient,
+                    args=(category,),
+                    help=f"Company coefficient: ×{company_value:g}",
+                )
+        if changed_coefficients:
+            st.caption(
+                "Changed for this estimate: "
+                + ", ".join(
+                    f"{category.upper()} ×{company_markups[category]:g} → ×{value:g}"
+                    for category, value in sorted(changed_coefficients.items())
+                    if category in company_markups
+                )
+            )
+            st.button(
+                "Reset to company coefficients",
+                on_click=reset_estimate_coefficients,
+                key="estimate_coefficients_reset",
+            )
+
+
+# --------------------------------------------------
 # AI ESTIMATE
 # --------------------------------------------------
 
@@ -2130,7 +2221,7 @@ if confirmed_items:
             "Global project multiplier",
             min_value=0.0,
             value=float(
-                price_data[
+                company_pricing[
                     "project_multiplier"
                 ]
             ),
@@ -2591,7 +2682,7 @@ if st.session_state[
             "Final global multiplier",
             min_value=0.0,
             value=float(
-                price_data[
+                company_pricing[
                     "project_multiplier"
                 ]
             ),

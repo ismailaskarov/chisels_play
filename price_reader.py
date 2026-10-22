@@ -105,35 +105,43 @@ def read_catalog_rows(source):
     return items
 
 
-def read_price_data(excel_path):
-    workbook = load_workbook(excel_path, data_only=True)
+def read_pricing_sheets(source):
+    workbook = load_workbook(source, data_only=True)
 
-    items = read_catalog_rows(excel_path)
+    markups = None
+    if "Categories" in workbook.sheetnames:
+        categories_sheet = workbook["Categories"]
+        markups = {}
 
-    categories_sheet = workbook["Categories"]
+        for row in range(2, categories_sheet.max_row + 1):
+            category = categories_sheet[f"A{row}"].value
+            coefficient = categories_sheet[f"B{row}"].value
 
-    markups = {}
+            if not category or coefficient is None:
+                continue
 
-    for row in range(2, categories_sheet.max_row + 1):
-        category = categories_sheet[f"A{row}"].value
-        coefficient = categories_sheet[f"B{row}"].value
+            category = str(category)
 
-        if not category or coefficient is None:
-            continue
+            if "(" in category and ")" in category:
+                category = category.split("(")[-1].split(")")[0]
 
-        category = str(category)
+            markups[category.strip().lower()] = float(coefficient)
 
-        if "(" in category and ")" in category:
-            category = category.split("(")[-1].split(")")[0]
-
-        markups[category.strip().lower()] = float(coefficient)
-
-    settings = workbook["Global_Settings"]
-
-    project_multiplier = float(settings["B2"].value or 1.0)
+    project_multiplier = None
+    if "Global_Settings" in workbook.sheetnames:
+        project_multiplier = float(workbook["Global_Settings"]["B2"].value or 1.0)
 
     return {
-        "items": items,
         "markups": markups,
         "project_multiplier": project_multiplier,
+    }
+
+
+def read_price_data(excel_path):
+    pricing = read_pricing_sheets(excel_path)
+
+    return {
+        "items": read_catalog_rows(excel_path),
+        "markups": pricing["markups"] if pricing["markups"] is not None else {},
+        "project_multiplier": pricing["project_multiplier"] or 1.0,
     }

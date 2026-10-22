@@ -16,7 +16,9 @@ from catalog_store import (
     delete_catalog_item,
     import_catalog_items,
     list_catalog_items,
+    load_pricing,
     price_list_imported,
+    save_pricing_settings,
     update_catalog_item,
 )
 from component_matcher import normalize_unit
@@ -30,7 +32,7 @@ from feedback_store import (
     normalize_text,
     record_votes,
 )
-from price_reader import read_catalog_rows, read_price_data
+from price_reader import read_catalog_rows, read_price_data, read_pricing_sheets
 
 
 PRICE_FILE = Path("data") / "prices.xlsx"
@@ -82,6 +84,29 @@ def run_change(action, message):
     st.cache_data.clear()
     st.session_state["admin_message"] = message(result) if callable(message) else message
     st.rerun()
+
+
+def editor_rows(value):
+    if hasattr(value, "to_dict"):
+        return value.to_dict(orient="records")
+    return list(value)
+
+
+def coefficient_changes(current, new_markups, new_multiplier):
+    changes = []
+    for category in sorted(set(current["markups"]) | set(new_markups)):
+        old_value = current["markups"].get(category)
+        new_value = new_markups.get(category)
+        if old_value != new_value:
+            changes.append(
+                f"{category.upper()}: "
+                + (f"×{old_value:g}" if old_value is not None else "new")
+                + " → "
+                + (f"×{new_value:g}" if new_value is not None else "removed")
+            )
+    if new_multiplier is not None and new_multiplier != current["project_multiplier"]:
+        changes.append(f'Project multiplier: ×{current["project_multiplier"]:g} → ×{new_multiplier:g}')
+    return changes
 
 
 def options_with(options, value):
@@ -235,10 +260,18 @@ except Exception as error:
 
 price_data = load_price_data()
 price_items = price_data["items"]
+
+try:
+    pricing = load_pricing(price_data["markups"], price_data["project_multiplier"], raise_errors=True)
+except Exception as error:
+    st.error(f"Could not load the coefficients from Supabase: {error}")
+    st.stop()
+
 categories = sorted(
     {str(item["category"]) for item in price_items + catalog_items if item.get("category")}
-    | {key.upper() for key in price_data["markups"]}
+    | {key.upper() for key in pricing["markups"]}
 )
+categories_in_use = {str(item["category"]).upper() for item in catalog_items if item.get("category")}
 units = sorted(
     set(BASE_UNITS)
     | {normalize_unit(item.get("unit")) for item in price_items + catalog_items if item.get("unit")}
@@ -289,9 +322,10 @@ reviewed_items = sorted(
     key=lambda item: (str(item["category"]).lower(), str(item["name"]).lower()),
 )
 
-pending_tab, catalog_tab, transfer_tab, corrections_tab = st.tabs([
+pending_tab, catalog_tab, coefficients_tab, transfer_tab, corrections_tab = st.tabs([
     f"Pending approval ({len(pending_items)})",
     f"Catalog ({len(reviewed_items)})",
+    "Coefficients",
     "Import / export Excel",
     "Learned corrections",
 ])
@@ -451,6 +485,59 @@ with catalog_tab:
                 )
 
 
+with coefficients_tab:
+    if pricing["stored"]:
+        st.caption("Company coefficients and default multiplier, stored in the database.")
+    else:
+        st.info(
+            "These values are still read from prices.xlsx. Saving them here stores them in the "
+            "database, and from then on they are changed only here."
+        )
+    st.caption(
+        "Every estimate starts with these values. Estimators can adjust them for a single estimate "
+        "in the Calculator. Add a row for a new category; a category used by catalog items cannot be removed."
+    )
+    item_counts = {}
+    for item in catalog_items if imported else price_items + catalog_items:
+        category = str(item.get("category") or "").upper()
+        item_counts[category] = item_counts.get(category, 0) + 1
+    coefficient_rows = [
+        {"Category": category.upper(), "Coefficient": float(value), "Items": item_counts.get(category.upper(), 0)}
+        for category, value in sorted(pricing["markups"].items())
+    ]
+    edited_coefficients = st.data_editor(
+        coefficient_rows,
+        num_rows="dynamic",
+        hide_index=True,
+        disabled=["Items"],
+        column_config={
+            "Category": st.column_config.TextColumn("Category", required=True),
+            "Coefficient": st.column_config.NumberColumn(
+                "Coefficient", min_value=0.01, step=0.05, format="×%.2f", required=True
+            ),
+            "Items": st.column_config.NumberColumn("Items using it"),
+        },
+        key="coefficients_editor",
+    )
+    default_multiplier = st.number_input(
+        "Default project multiplier",
+        min_value=0.01,
+        value=float(pricing["project_multiplier"]),
+        step=0.05,
+        key="default_multiplier",
+    )
+    if st.button("Save coefficients", type="primary", key="save_coefficients"):
+        pairs = [
+            (row.get("Category"), row.get("Coefficient"))
+            for row in editor_rows(edited_coefficients)
+            if row.get("Category") or row.get("Coefficient") is not None
+        ]
+        run_change(
+            lambda: save_pricing_settings(pairs, default_multiplier, admin_name, categories_in_use),
+            "Coefficients saved. New estimates use them now.",
+        )
+
+
 with transfer_tab:
     st.markdown("**Export**")
     export_items = reviewed_items if imported else price_items + reviewed_items
@@ -460,7 +547,7 @@ with transfer_tab:
     )
     st.download_button(
         f"Download catalog as Excel ({len(export_items)} items)",
-        data=catalog_to_excel(export_items, price_data["markups"], price_data["project_multiplier"]),
+        data=catalog_to_excel(export_items, pricing["markups"], pricing["project_multiplier"]),
         file_name="catalog.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
@@ -472,13 +559,15 @@ with transfer_tab:
         "Unit and Price (EUR). Material_Type, Component_Type, Brand/Model, Thickness_mm, Keywords, Synonyms, "
         "Description, Allowed_Use, Needs_Review, Notes, Supplier, Source_URL and Active are optional. "
         "Items with the same name, category and unit are updated; new ones are added as approved. "
-        "Nothing is deleted."
+        "Nothing is deleted. If the file also has Categories and Global_Settings sheets (like prices.xlsx), "
+        "the coefficients and default multiplier can be replaced too."
     )
     uploaded = st.file_uploader("Excel file", type=["xlsx"], key="catalog_import_file")
     if uploaded is not None:
         try:
             rows = read_catalog_rows(io.BytesIO(uploaded.getvalue()))
             preview = import_catalog_items(rows, admin_name, dry_run=True)
+            file_pricing = read_pricing_sheets(io.BytesIO(uploaded.getvalue()))
         except Exception as error:
             st.error(f"Could not read this file: {error}")
         else:
@@ -492,15 +581,44 @@ with transfer_tab:
                 st.warning("Repeated rows skipped: " + ", ".join(preview["duplicates"]))
             if preview["skipped"]:
                 st.warning("Invalid rows skipped: " + "; ".join(preview["skipped"]))
+
+            pricing_changes = []
+            if file_pricing["markups"]:
+                pricing_changes = coefficient_changes(
+                    pricing,
+                    file_pricing["markups"],
+                    file_pricing["project_multiplier"],
+                )
+            update_pricing = False
+            if pricing_changes:
+                st.write("Coefficients in this file differ: " + "; ".join(pricing_changes))
+                update_pricing = st.checkbox(
+                    "Also replace the coefficients and default multiplier with the ones in this file",
+                    value=True,
+                    key="catalog_import_pricing",
+                )
+            elif file_pricing["markups"]:
+                st.caption("Coefficients and default multiplier in this file are the same as now.")
+
+            def import_file():
+                if update_pricing:
+                    save_pricing_settings(
+                        list(file_pricing["markups"].items()),
+                        file_pricing["project_multiplier"] or pricing["project_multiplier"],
+                        admin_name,
+                        categories_in_use | {str(row.get("category") or "").upper() for row in rows},
+                    )
+                return import_catalog_items(rows, admin_name, source_type="excel_import")
+
             if st.button(
                 "Import",
                 type="primary",
-                disabled=not (preview["added"] or preview["updated"]),
+                disabled=not (preview["added"] or preview["updated"] or update_pricing),
                 key="catalog_import_button",
             ):
                 run_change(
-                    lambda: import_catalog_items(rows, admin_name, source_type="excel_import"),
-                    import_message,
+                    import_file,
+                    lambda result: import_message(result) + (" Coefficients updated." if update_pricing else ""),
                 )
 
 
