@@ -1,5 +1,5 @@
-from datetime import date, timedelta
 from pathlib import Path
+from copy import deepcopy
 
 import streamlit as st
 
@@ -28,11 +28,12 @@ from catalog_store import (
     load_pricing,
 )
 from ui import apply_style, show_header, show_sidebar, step_header
-from quote_generator import (
-    build_quote_pdf,
-    calculate_quote_totals,
-    quote_filename,
-)
+from project_store import project_storage_name, save_project
+from fragments.project_drawing import render_project_and_drawing
+from fragments.review_summary import render_review_summary
+from fragments.quotation import render_quotation
+from utils.performance import timed
+from utils.match_safety import selection_conflict, should_auto_learn_match
 
 
 PRICE_FILE = Path("data") / "prices.xlsx"
@@ -67,7 +68,7 @@ def load_data():
     )
 
 
-price_data = load_data()
+price_data = timed("load_data", load_data)
 
 
 @st.cache_data(ttl=300)
@@ -81,10 +82,14 @@ def load_company_pricing(base_markups, base_multiplier):
 
 
 try:
-    all_items = load_catalog(price_data[
-        "items"
-    ])
-    company_pricing = load_company_pricing(
+    all_items = timed(
+        "load_catalog",
+        load_catalog,
+        price_data["items"],
+    )
+    company_pricing = timed(
+        "load_company_pricing",
+        load_company_pricing,
         price_data["markups"],
         price_data["project_multiplier"],
     )
@@ -133,6 +138,9 @@ DEFAULT_SESSION_STATE = {
     "ai_result": None,
     "ai_parts": [],
     "catalog_matches": None,
+    "current_project_id": None,
+    "project_status": "Draft",
+    "project_service_rows": [],
 }
 
 
@@ -383,6 +391,10 @@ def apply_ai_data(
             str(key).startswith(
                 "estimate_coefficient"
             )
+            or
+            str(key).startswith(
+                "learning_conflict_"
+            )
         ):
             keys_to_delete.append(
                 key
@@ -630,6 +642,16 @@ def save_catalog_candidate(candidate):
         st.info(f'Already in catalog: {candidate["name"]}')
 
 
+def _market_cache_key(ai_part, selected_item):
+    item = selected_item or {}
+    fields = (
+        ai_part.get("name"), ai_part.get("component_type"), ai_part.get("material"),
+        ai_part.get("thickness_mm"), ai_part.get("length_mm"), ai_part.get("width_mm"),
+        item.get("name"), item.get("unit"), item.get("material_type"), item.get("thickness_mm"),
+    )
+    return tuple(str(value or "").strip().lower() for value in fields)
+
+
 def show_market_check(
     match,
     ai_part,
@@ -642,25 +664,40 @@ def show_market_check(
         "Market price check",
         expanded=(result is not None or selected_item is None),
     ):
-        if st.button(
-            "Check market prices" if result is None else "Search again",
-            key=f"market_check_{part_index}",
-        ):
-            with st.spinner("Searching shops..."):
-                try:
-                    result = search_market_prices(ai_part, selected_item)
-                    match["market_search_count"] = match.get("market_search_count", 0) + 1
-                    result["search_id"] = match["market_search_count"]
-                    result["searched_for"] = (
-                        selected_item["name"]
-                        if selected_item is not None
-                        else ai_part.get("name")
-                    )
-                    match["market_result"] = result
-                    match.pop("market_error", None)
-                except Exception as error:
-                    print("MARKET PRICE ERROR:", repr(error))
-                    match["market_error"] = str(error)
+        cache = st.session_state.setdefault("market_search_cache", {})
+        cache_key = _market_cache_key(ai_part, selected_item)
+        cached_result = cache.get(cache_key)
+        if result is None and cached_result is not None:
+            button_label = "Use cached market prices"
+        elif result is None:
+            button_label = "Check market prices"
+        else:
+            button_label = "Search again"
+
+        if st.button(button_label, key=f"market_check_{part_index}"):
+            force_refresh = result is not None
+            if cached_result is not None and not force_refresh:
+                result = deepcopy(cached_result)
+                print("[MARKET CACHE] Reused cached market search for:", ai_part.get("name"))
+                match["market_result"] = result
+                match.pop("market_error", None)
+            else:
+                with st.spinner("Searching shops..."):
+                    try:
+                        result = timed("market_price_search", search_market_prices, ai_part, selected_item)
+                        match["market_search_count"] = match.get("market_search_count", 0) + 1
+                        result["search_id"] = match["market_search_count"]
+                        result["searched_for"] = (
+                            selected_item["name"]
+                            if selected_item is not None
+                            else ai_part.get("name")
+                        )
+                        cache[cache_key] = deepcopy(result)
+                        match["market_result"] = result
+                        match.pop("market_error", None)
+                    except Exception as error:
+                        print("MARKET PRICE ERROR:", repr(error))
+                        match["market_error"] = str(error)
             st.rerun()
 
         if match.get("market_error"):
@@ -768,7 +805,7 @@ def show_market_check(
                         f'{"above" if difference > 0 else "below"}'
                     )
                 group_rows.append(row)
-            st.dataframe(group_rows, hide_index=True, use_container_width=True)
+            st.dataframe(group_rows, hide_index=True, width="stretch")
             if list_price is not None:
                 st.caption(
                     f'Price list: €{list_price:.2f}/{unit}. '
@@ -816,7 +853,7 @@ def show_market_check(
                 ],
                 column_config={"Link": st.column_config.LinkColumn("Link")},
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
             )
             return None
 
@@ -847,7 +884,7 @@ def show_market_check(
         edited_offers = st.data_editor(
             offer_rows,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             disabled=[
                 "Shop",
                 "Product",
@@ -1017,7 +1054,24 @@ def remember_catalog_choice(
             ] = True
 
         if selected_item is None:
+            st.session_state.pop(f"learning_conflict_{part_index}", None)
+            st.session_state.pop(f"learning_conflict_confirmed_{part_index}", None)
             return
+
+        match["manual_choice"] = not same_catalog_item(selected_item, match.get("ai_price_item"))
+        conflict = selection_conflict(match["ai_part"], selected_item)
+        if conflict:
+            st.session_state[f"learning_conflict_{part_index}"] = conflict
+            st.session_state[f"learning_conflict_confirmed_{part_index}"] = False
+            st.session_state["feedback_notice"] = (
+                f'Changed "{match["ai_part"].get("name")}" to {selected_item["name"]}. '
+                "This specification conflicts with the detected part. It will be used in the "
+                "current estimate but will not be learned unless you explicitly confirm it."
+            )
+            return
+
+        st.session_state.pop(f"learning_conflict_{part_index}", None)
+        st.session_state.pop(f"learning_conflict_confirmed_{part_index}", None)
 
         saved = save_match_feedback(
             match["ai_part"],
@@ -1053,6 +1107,26 @@ def remember_catalog_choice(
             )
 
         return
+
+
+def confirm_conflicting_learning(part_index, match, selected_item):
+    saved = save_match_feedback(
+        match["ai_part"],
+        selected_item,
+        ai_item=match.get("ai_price_item"),
+    )
+    match["saved_record_key"] = saved
+    if saved:
+        st.session_state[f"learning_conflict_confirmed_{part_index}"] = True
+        st.session_state["feedback_notice"] = (
+            f'Confirmed and remembered unusual match: '
+            f'"{match["ai_part"].get("name")}" → {selected_item["name"]}.'
+        )
+    else:
+        st.session_state["feedback_notice"] = (
+            "Could not save this unusual match for future suggestions."
+        )
+
 
 
 # --------------------------------------------------
@@ -1112,6 +1186,10 @@ def clear_product():
         "catalog_matches"
     ] = None
 
+    st.session_state["current_project_id"] = None
+    st.session_state["project_status"] = "Draft"
+    st.session_state["project_service_rows"] = []
+
 
     keys_to_delete = []
 
@@ -1151,6 +1229,10 @@ def clear_product():
             str(key).startswith(
                 "estimate_coefficient"
             )
+            or
+            str(key).startswith(
+                "learning_conflict_"
+            )
         ):
             keys_to_delete.append(
                 key
@@ -1161,6 +1243,10 @@ def clear_product():
         del st.session_state[
             key
         ]
+
+    # File uploader/project-name fallback state belongs to the current drawing.
+    st.session_state.pop("drawing_upload", None)
+    st.session_state.pop("pending_project_name", None)
 
 
     print(
@@ -1195,159 +1281,15 @@ show_header(
 
 
 # --------------------------------------------------
-# PROJECT
+# PROJECT + DRAWING (FRAGMENT)
 # --------------------------------------------------
 
-step_header(1, "Project")
-
-st.text_input(
-    "Project name",
-    key="project_name",
-    placeholder="e.g. Reception desk - Europa office",
-    help="Shown on the quotation PDF and used in its file name.",
+render_project_and_drawing(
+    all_items,
+    apply_ai_data,
 )
 
-project_name = st.session_state["project_name"].strip()
-
-
-# --------------------------------------------------
-# FILE UPLOAD
-# --------------------------------------------------
-
-step_header(2, "Drawing")
-
-uploaded_file = st.file_uploader(
-    "Upload PDF or image",
-    type=[
-        "pdf",
-        "jpg",
-        "jpeg",
-        "png",
-    ],
-)
-
-if not project_name:
-    st.caption(
-        "Project name is optional. You can upload and analyse the drawing first."
-    )
-
-
-if uploaded_file is not None:
-
-    st.success(
-        f"Uploaded: "
-        f"{uploaded_file.name}"
-    )
-
-
-    extension = (
-        uploaded_file.name
-        .lower()
-        .split(".")[-1]
-    )
-
-
-    if extension in [
-        "jpg",
-        "jpeg",
-        "png",
-    ]:
-
-        st.image(
-            uploaded_file,
-            width=600,
-        )
-
-
-    if st.button(
-        "Analyze and build estimate",
-        type="primary",
-    ):
-
-        try:
-
-            with st.spinner(
-                "Reading drawing with AI..."
-            ):
-
-                print(
-                    "Starting drawing analysis:",
-                    uploaded_file.name,
-                )
-
-                ai_data = (
-                    extract_furniture(
-                        uploaded_file
-                    )
-                )
-
-                if not st.session_state["project_name"].strip():
-                    suggested_name = str(
-                        ai_data.get("furniture_name")
-                        or Path(uploaded_file.name).stem
-                    ).strip()
-                    st.session_state["project_name"] = suggested_name
-
-                apply_ai_data(
-                    ai_data
-                )
-
-
-            with st.spinner(
-                "Matching drawing parts "
-                "to the real price catalog..."
-            ):
-
-                matches = (
-                    match_parts_to_catalog(
-                        ai_data,
-                        all_items,
-                        feedback=(
-                            load_match_feedback()
-                        ),
-                    )
-                )
-
-                st.session_state[
-                    "catalog_matches"
-                ] = matches
-
-
-            print(
-                "Drawing analysis "
-                "and catalog matching complete."
-            )
-
-
-            st.rerun()
-
-
-        except Exception as error:
-
-            print(
-                "AI PROCESSING ERROR:",
-                repr(error),
-            )
-
-            if (
-                st.session_state[
-                    "catalog_matches"
-                ]
-                is None
-            ):
-
-                st.session_state[
-                    "ai_result"
-                ] = None
-
-                st.session_state[
-                    "ai_parts"
-                ] = []
-
-            st.error(
-                f"AI processing failed: "
-                f"{error}"
-            )
+project_name = str(st.session_state.get("project_name") or "").strip()
 
 
 # --------------------------------------------------
@@ -1755,6 +1697,41 @@ if matches:
             )
 
 
+        selected_match_conflict = (
+            selection_conflict(ai_part, selected_item)
+            if selected_item is not None
+            and not selected_item.get("market")
+            and not selected_item.get("custom")
+            else None
+        )
+
+        if selected_match_conflict:
+            add_review_issue(
+                review_issues,
+                part_index,
+                ai_part.get("name"),
+                "Specification conflict",
+                selected_match_conflict,
+            )
+            st.warning(
+                selected_match_conflict
+                + " If this is intentional, confirm it below before the choice is learned."
+            )
+            confirm_key = f"learning_conflict_confirmed_{part_index}"
+            confirmed_conflict = st.checkbox(
+                "I confirm this unusual specification match should be learned",
+                key=confirm_key,
+            )
+            if st.button(
+                "Confirm and remember unusual match",
+                key=f"confirm_learning_conflict_button_{part_index}",
+                disabled=not confirmed_conflict or bool(match.get("saved_record_key")),
+            ):
+                confirm_conflicting_learning(part_index, match, selected_item)
+                st.rerun()
+
+
+
         # ------------------------------------------
         # NO MATCH WORKFLOW
         # ------------------------------------------
@@ -2128,6 +2105,7 @@ if matches:
         if (
             not selected_item.get("market")
             and not selected_item.get("custom")
+            and not selection_conflict(ai_part, selected_item)
         ):
 
             confirmed_choices.append(
@@ -2139,7 +2117,7 @@ if matches:
 
 
 # --------------------------------------------------
-# NEEDS REVIEW SUMMARY
+# NEEDS REVIEW SUMMARY (FRAGMENT)
 # --------------------------------------------------
 
 st.session_state["current_review_issues"] = [
@@ -2147,57 +2125,7 @@ st.session_state["current_review_issues"] = [
     for issue in review_issues
 ]
 
-if matches:
-    st.divider()
-    st.subheader("Needs review")
-
-    total_parts = len(matches)
-    issue_part_indexes = {
-        issue.get("part_index")
-        for issue in review_issues
-    }
-    reviewed_count = max(0, total_parts - len(issue_part_indexes))
-
-    r1, r2, r3 = st.columns(3)
-    with r1:
-        st.metric("Detected parts", total_parts)
-    with r2:
-        st.metric("No current warning", reviewed_count)
-    with r3:
-        st.metric("Warnings", len(review_issues))
-
-    if review_issues:
-        st.warning(
-            "Review the items below before relying on the estimate. "
-            "Warnings do not block testing or quotation generation."
-        )
-
-        for issue in review_issues:
-            warning_col, button_col = st.columns(
-                [5, 1.4],
-                vertical_alignment="center",
-            )
-
-            with warning_col:
-                st.markdown(
-                    f'**{issue["part_name"]}**  \n'
-                    f'{issue["issue_type"]}: {issue["detail"]}'
-                )
-
-            with button_col:
-                st.markdown(
-                    (
-                        f'<a class="cp-review-link" '
-                        f'href="#component-{issue["part_index"]}">'
-                        f'Review component →'
-                        f'</a>'
-                    ),
-                    unsafe_allow_html=True,
-                )
-    else:
-        st.success(
-            "No current component-level warnings were detected."
-        )
+render_review_summary(matches, review_issues, len(confirmed_items))
 
 
 # --------------------------------------------------
@@ -2362,19 +2290,24 @@ if confirmed_items:
             confirmed_choices
         ):
 
-            if match.get(
-                "saved_record_key"
-            ):
+            if match.get("saved_record_key"):
                 continue
 
-            match[
-                "saved_record_key"
-            ] = save_match_feedback(
+            safe_to_learn, learning_reason = should_auto_learn_match(
+                match, selected_item, min_confidence=0.90
+            )
+            if not safe_to_learn:
+                print(
+                    "[LEARNING SAFETY] Not auto-learning:",
+                    match["ai_part"].get("name"), "->", selected_item.get("name"),
+                    "|", learning_reason,
+                )
+                continue
+
+            match["saved_record_key"] = save_match_feedback(
                 match["ai_part"],
                 selected_item,
-                ai_item=match.get(
-                    "ai_price_item"
-                ),
+                ai_item=match.get("ai_price_item"),
             )
 
         print(
@@ -2844,7 +2777,7 @@ if st.session_state[
             st.dataframe(
                 breakdown_rows,
                 hide_index=True,
-                use_container_width=True,
+                width="stretch",
                 column_config={
                     "Unit price": st.column_config.NumberColumn(
                         "Unit price",
@@ -2889,452 +2822,124 @@ if st.session_state[
         )
 
 
-    # --------------------------------------------------
-    # CLIENT QUOTATION
-    # --------------------------------------------------
+    render_quotation(result, project_name, LOGO_PATH)
 
-    st.divider()
+# --------------------------------------------------
+# PROJECT HISTORY SAVE
+# --------------------------------------------------
 
-    step_header(5, "Client quotation")
+st.divider()
+st.subheader("Save project")
+st.caption(
+    "Save the current estimate as a reusable project snapshot. Reopening a project keeps "
+    "the prices and selections saved at that time; it does not silently replace them with newer catalog prices."
+)
 
-    st.caption(
-        "The calculated price stays unchanged internally. "
-        "Set the final client price separately if you want "
-        "to adjust it based on the market or commercial decision."
-    )
 
-    q1, q2, q3 = st.columns(3)
-
-    with q1:
-        quote_number = st.text_input(
-            "Quote number",
-            value=(
-                st.session_state.get(
-                    "quote_number_value"
-                )
-                or f"CP-{date.today():%Y%m%d}"
-            ),
-            key="quote_number_value",
-        )
-
-    with q2:
-        quote_date = st.date_input(
-            "Quote date",
-            value=date.today(),
-            key="quote_date_value",
-        )
-
-    with q3:
-        validity_date = st.date_input(
-            "Validity date",
-            value=date.today() + timedelta(days=30),
-            key="quote_validity_value",
-        )
-
-    q4, q5 = st.columns(2)
-
-    with q4:
-        client_name = st.text_input(
-            "Client name",
-            key="quote_client_name",
-        )
-
-    with q5:
-        quote_product_name = st.text_input(
-            "Product / furniture name",
-            value=(
-                st.session_state.get(
-                    "furniture_name"
-                )
-                or project_name
-                or "Furniture"
-            ),
-            key="quote_product_name",
-        )
-
-    calculated_total = round(float(result["total"]), 2)
-    previous_total = st.session_state.get("quote_calculated_total")
-    if (
-        "quote_final_client_price" not in st.session_state
-        or (
-            previous_total is not None
-            and previous_total != calculated_total
-            and round(float(st.session_state["quote_final_client_price"]), 2) == previous_total
-        )
-    ):
-        st.session_state["quote_final_client_price"] = calculated_total
-    st.session_state["quote_calculated_total"] = calculated_total
-
-    def use_calculated_price(total):
-        st.session_state["quote_final_client_price"] = total
-
-    price_col1, price_col2, price_col3 = st.columns(3)
-
-    with price_col1:
-        st.metric(
-            "Calculated price",
-            f'€{result["total"]:.2f}',
-        )
-
-    with price_col2:
-        final_client_price = st.number_input(
-            "Final client price (excl. VAT)",
-            min_value=0.0,
-            step=50.0,
-            key="quote_final_client_price",
-            help="Follows the calculated price until you type your own price.",
-        )
-
-    with price_col3:
-        price_adjustment = (
-            final_client_price
-            - float(result["total"])
-        )
-
-        st.metric(
-            "Price adjustment",
-            f'€{price_adjustment:+.2f}',
-        )
-
-        if round(price_adjustment, 2) != 0:
-            st.button(
-                "Use calculated price",
-                on_click=use_calculated_price,
-                args=(calculated_total,),
-                key="quote_use_calculated_price",
-            )
-
-    st.markdown(
-        "**Additional services**"
-    )
-
-    default_services = [
-        {
-            "Service": "Matavimas",
-            "Quantity": 1.0,
-            "Price excl. VAT": 0.0,
-        },
-        {
-            "Service": "Pristatymas",
-            "Quantity": 1.0,
-            "Price excl. VAT": 0.0,
-        },
-        {
-            "Service": "Montavimas",
-            "Quantity": 1.0,
-            "Price excl. VAT": 0.0,
-        },
-        {
-            "Service": "Kita paslauga",
-            "Quantity": 1.0,
-            "Price excl. VAT": 0.0,
-        },
-    ]
-
-    edited_services = st.data_editor(
-        default_services,
-        num_rows="dynamic",
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Service": st.column_config.TextColumn(
-                "Service",
-                required=True,
-            ),
-            "Quantity": st.column_config.NumberColumn(
-                "Quantity",
-                min_value=0.0,
-                step=1.0,
-            ),
-            "Price excl. VAT": st.column_config.NumberColumn(
-                "Price excl. VAT",
-                min_value=0.0,
-                step=10.0,
-                format="€%.2f",
-            ),
-        },
-        key="quote_services_editor",
-    )
-
-    service_rows = []
-
-    if hasattr(edited_services, "to_dict"):
-        edited_service_rows = edited_services.to_dict(
-            orient="records"
-        )
-    else:
-        edited_service_rows = list(
-            edited_services
-        )
-
-    for row in edited_service_rows:
-        service_rows.append({
-            "name": row.get(
-                "Service"
-            ),
-            "quantity": row.get(
-                "Quantity",
-                1.0,
-            ),
-            "price": row.get(
-                "Price excl. VAT",
-                0.0,
-            ),
-        })
-
-    settings1, settings2, settings3 = st.columns(3)
-
-    with settings1:
-        vat_percent = st.number_input(
-            "VAT %",
-            min_value=0.0,
-            value=21.0,
-            step=1.0,
-            key="quote_vat_percent",
-        )
-
-    with settings2:
-        discount_type_label = st.selectbox(
-            "Discount type",
-            [
-                "Amount (€)",
-                "Percent (%)",
-            ],
-            key="quote_discount_type",
-        )
-
-    with settings3:
-        discount_value = st.number_input(
-            "Discount",
-            min_value=0.0,
-            value=0.0,
-            step=10.0,
-            key="quote_discount_value",
-        )
-
-    discount_mode = (
-        "percent"
-        if discount_type_label == "Percent (%)"
-        else "amount"
-    )
-
-    quote_totals = calculate_quote_totals(
-        furniture_price=final_client_price,
-        services=service_rows,
-        vat_percent=vat_percent,
-        discount_value=discount_value,
-        discount_mode=discount_mode,
-    )
-
-    preview1, preview2, preview3, preview4 = st.columns(4)
-
-    with preview1:
-        st.metric(
-            "Before discount",
-            f'€{quote_totals["subtotal_before_discount"]:.2f}',
-        )
-
-    with preview2:
-        st.metric(
-            "Discount",
-            f'€{quote_totals["discount_amount"]:.2f}',
-        )
-
-    with preview3:
-        st.metric(
-            f'VAT {vat_percent:g}%',
-            f'€{quote_totals["vat_amount"]:.2f}',
-        )
-
-    with preview4:
-        st.metric(
-            "CLIENT TOTAL",
-            f'€{quote_totals["total_with_vat"]:.2f}',
-        )
-
-    # --------------------------------------------------
-    # QUOTATION PREVIEW
-    # --------------------------------------------------
-
-    st.markdown("**Quotation preview**")
-
-    meta1, meta2, meta3 = st.columns(3)
-    with meta1:
-        st.caption("Client")
-        st.write(client_name or "—")
-    with meta2:
-        st.caption("Quote number")
-        st.write(quote_number or "—")
-    with meta3:
-        st.caption("Valid until")
-        st.write(
-            validity_date.strftime("%d/%m/%Y")
-            if hasattr(validity_date, "strftime")
-            else validity_date
-        )
-
-    preview_rows = [{
-        "Nr.": 1,
-        "Product / service": quote_product_name or "Furniture",
-        "Unit price": float(final_client_price),
-        "Quantity": 1.0,
-        "Total excl. VAT": float(final_client_price),
-    }]
-
-    for service_index, service in enumerate(
-        quote_totals["services"],
-        start=2,
-    ):
-        preview_rows.append({
-            "Nr.": service_index,
-            "Product / service": service["name"],
-            "Unit price": service["price"],
-            "Quantity": service["quantity"],
-            "Total excl. VAT": service["total"],
-        })
-
-    st.dataframe(
-        preview_rows,
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Unit price": st.column_config.NumberColumn(
-                "Unit price",
-                format="€%.2f",
-            ),
-            "Total excl. VAT": st.column_config.NumberColumn(
-                "Total excl. VAT",
-                format="€%.2f",
-            ),
-        },
-    )
-
-    pv1, pv2, pv3, pv4 = st.columns(4)
-    with pv1:
-        st.metric(
-            "Subtotal",
-            f'€{quote_totals["subtotal_before_discount"]:.2f}',
-        )
-    with pv2:
-        st.metric(
-            "Discount",
-            f'€{quote_totals["discount_amount"]:.2f}',
-        )
-    with pv3:
-        st.metric(
-            f'VAT {vat_percent:g}% ',
-            f'€{quote_totals["vat_amount"]:.2f}',
-        )
-    with pv4:
-        st.metric(
-            "TOTAL",
-            f'€{quote_totals["total_with_vat"]:.2f}',
-        )
-
-    # --------------------------------------------------
-    # READY-TO-QUOTE WARNINGS (NON-BLOCKING)
-    # --------------------------------------------------
-
-    quote_warnings = []
-
-    for issue in st.session_state.get(
+def _project_snapshot():
+    snapshot = {}
+    exact_keys = {
+        "project_name",
+        "project_status",
+        "items",
+        "furniture_name",
+        "furniture_type",
+        "overall_width",
+        "overall_height",
+        "overall_depth",
+        "door_count",
+        "shelf_count",
+        "drawing_notes",
+        "ai_result",
+        "ai_parts",
+        "catalog_matches",
         "current_review_issues",
-        [],
-    ):
-        quote_warnings.append(
-            f'{issue.get("part_name", "Part")}: '
-            f'{issue.get("issue_type", "warning")} — '
-            f'{issue.get("detail", "")}'
-        )
+        "estimate_coefficients",
+        "ai_multiplier",
+        "final_multiplier",
+        "quote_number_value",
+        "quote_date_value",
+        "quote_validity_value",
+        "quote_client_name",
+        "quote_product_name",
+        "quote_final_client_price",
+        "quote_calculated_total",
+        "quote_vat_percent",
+        "quote_discount_type",
+        "quote_discount_value",
+        "project_service_rows",
+    }
+    prefixes = (
+        "catalog_select_",
+        "catalog_quantity_",
+        "no_match_resolution_",
+        "custom_name_",
+        "custom_category_",
+        "custom_unit_",
+        "custom_price_",
+        "custom_brand_",
+        "custom_notes_",
+    )
+    for key, value in st.session_state.items():
+        key_text = str(key)
+        if key_text in exact_keys or key_text.startswith(prefixes):
+            snapshot[key_text] = value
+    return snapshot
 
-    if not str(client_name).strip():
-        quote_warnings.append("Client name is empty.")
 
-    if not str(quote_number).strip():
-        quote_warnings.append("Quote number is empty.")
+calculated_price_for_history = 0.0
+if "result" in locals() and isinstance(result, dict):
+    calculated_price_for_history = float(result.get("total") or 0.0)
+else:
+    calculated_price_for_history = float(
+        st.session_state.get("quote_calculated_total") or 0.0
+    )
 
-    if not str(quote_product_name).strip():
-        quote_warnings.append("Product / furniture name is empty.")
+final_price_for_history = float(
+    st.session_state.get("quote_final_client_price")
+    or calculated_price_for_history
+    or 0.0
+)
 
-    if float(final_client_price) <= 0:
-        quote_warnings.append("Final client price is zero.")
-
-    if validity_date < quote_date:
-        quote_warnings.append(
-            "Validity date is earlier than the quote date."
-        )
-
-    if quote_warnings:
-        st.warning(
-            "Ready-to-quote check found warnings. "
-            "They do not block PDF generation while the calculator is being tested."
-        )
-        for warning in quote_warnings:
-            st.markdown(f"- {warning}")
-    else:
-        st.success(
-            "Ready-to-quote check: no current warnings."
-        )
-
-    if st.button(
-        "Generate quotation PDF",
+save_col1, save_col2 = st.columns([1, 3])
+with save_col1:
+    save_clicked = st.button(
+        "Save project",
         type="primary",
-        key="generate_quote_button",
-    ):
-        # Warnings above are intentionally advisory only during testing.
-        # They never disable or block PDF generation.
-        try:
-            generated_bytes = build_quote_pdf(
-                quote_number=quote_number,
-                quote_date=quote_date,
-                validity_date=validity_date,
-                client_name=client_name,
-                furniture_name=quote_product_name,
-                furniture_price=final_client_price,
-                services=service_rows,
-                vat_percent=vat_percent,
-                discount_value=discount_value,
-                discount_mode=discount_mode,
-                logo_path=LOGO_PATH,
-                project_name=project_name,
-            )
-
-            if not generated_bytes:
-                raise ValueError("The PDF generator returned an empty file.")
-
-            st.session_state["generated_quote_bytes"] = generated_bytes
-            st.session_state["generated_quote_filename"] = quote_filename(
-                quote_number or "quotation",
-                client_name or "client",
-                project_name,
-            )
-            st.success("Quotation PDF generated. Download it below.")
-
-        except Exception as error:
-            st.session_state.pop("generated_quote_bytes", None)
-            st.session_state.pop("generated_quote_filename", None)
-            print("QUOTATION PDF ERROR:", repr(error))
-            st.error(
-                "Quotation generation failed. The warning check did not block it; "
-                f"the PDF generator returned this error: {error}"
-            )
-
-    if st.session_state.get(
-        "generated_quote_bytes"
-    ):
-
-        st.download_button(
-            "Download quotation (.pdf)",
-            data=st.session_state[
-                "generated_quote_bytes"
-            ],
-            file_name=st.session_state.get(
-                "generated_quote_filename",
-                "quotation.pdf",
-            ),
-            mime="application/pdf",
-            key="download_quote_button",
+        disabled=not project_name,
+        key="save_project_history_button",
+    )
+with save_col2:
+    st.caption(
+        f"Storage: {project_storage_name()}. "
+        + (
+            "This will update the opened project."
+            if st.session_state.get("current_project_id")
+            else "This will create a new project history record."
         )
+    )
+
+if save_clicked:
+    try:
+        saved = timed(
+            "save_project",
+            save_project,
+            snapshot=_project_snapshot(),
+            project_id=st.session_state.get("current_project_id"),
+            project_name=project_name,
+            client_name=st.session_state.get("quote_client_name", ""),
+            status=st.session_state.get("project_status", "Draft"),
+            furniture_name=st.session_state.get("quote_product_name")
+            or st.session_state.get("furniture_name", ""),
+            quote_number=st.session_state.get("quote_number_value", ""),
+            calculated_price=calculated_price_for_history,
+            final_client_price=final_price_for_history,
+        )
+        st.session_state["current_project_id"] = saved["id"]
+        st.success("Project saved to history.")
+    except Exception as error:
+        print("PROJECT SAVE ERROR:", repr(error))
+        st.error(f"Project could not be saved: {error}")
 
 
 # --------------------------------------------------

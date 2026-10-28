@@ -39,6 +39,7 @@ def _restore_project(project):
         "no_match_resolution_",
         "generated_quote_",
         "estimate_coefficient",
+        "learning_conflict_",
     )
     for key in list(st.session_state.keys()):
         if str(key).startswith(prefixes):
