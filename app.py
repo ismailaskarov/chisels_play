@@ -1224,14 +1224,15 @@ uploaded_file = st.file_uploader(
         "jpeg",
         "png",
     ],
-    disabled=not project_name,
 )
 
 if not project_name:
-    st.caption("Name the project first, then upload its drawing.")
+    st.caption(
+        "Project name is optional. You can upload and analyse the drawing first."
+    )
 
 
-if uploaded_file is not None and project_name:
+if uploaded_file is not None:
 
     st.success(
         f"Uploaded: "
@@ -1279,6 +1280,13 @@ if uploaded_file is not None and project_name:
                         uploaded_file
                     )
                 )
+
+                if not st.session_state["project_name"].strip():
+                    suggested_name = str(
+                        ai_data.get("furniture_name")
+                        or Path(uploaded_file.name).stem
+                    ).strip()
+                    st.session_state["project_name"] = suggested_name
 
                 apply_ai_data(
                     ai_data
@@ -1463,6 +1471,11 @@ if matches:
             match[
                 "part_index"
             ]
+        )
+
+        st.markdown(
+            f'<div id="component-{part_index}"></div>',
+            unsafe_allow_html=True,
         )
 
         ai_part = (
@@ -2160,10 +2173,27 @@ if matches:
         )
 
         for issue in review_issues:
-            st.markdown(
-                f'- **{issue["part_name"]}** — '
-                f'{issue["issue_type"]}: {issue["detail"]}'
+            warning_col, button_col = st.columns(
+                [5, 1.4],
+                vertical_alignment="center",
             )
+
+            with warning_col:
+                st.markdown(
+                    f'**{issue["part_name"]}**  \n'
+                    f'{issue["issue_type"]}: {issue["detail"]}'
+                )
+
+            with button_col:
+                st.markdown(
+                    (
+                        f'<a class="cp-review-link" '
+                        f'href="#component-{issue["part_index"]}">'
+                        f'Review component →'
+                        f'</a>'
+                    ),
+                    unsafe_allow_html=True,
+                )
     else:
         st.success(
             "No current component-level warnings were detected."

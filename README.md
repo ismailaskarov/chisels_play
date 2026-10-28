@@ -830,3 +830,49 @@ The calculator should be treated as:
 > **AI prepares the estimate; deterministic code calculates prices; the estimator resolves exceptions and controls the final commercial price.**
 
 The goal is not to hide uncertainty. The goal is to make uncertainty obvious and fast to review while keeping the final pricing calculation deterministic and auditable.
+
+---
+
+## Project history
+
+The Calculator can save the current estimate as a project snapshot and reopen it later from the **Projects** page.
+
+Saved project metadata includes:
+
+- project name and status;
+- client name;
+- furniture/product name;
+- quote number;
+- calculated selling price;
+- final client price;
+- created and updated timestamps.
+
+The project snapshot also keeps the estimator state needed to continue work, including:
+
+- approved/current estimate items and their saved prices;
+- AI extraction and catalog matching results;
+- current review warnings;
+- estimate-specific coefficient changes and multipliers;
+- quotation dates, VAT and discount settings;
+- additional quotation services;
+- current custom/unmatched component inputs where applicable.
+
+A reopened project is a **historical snapshot**. Its saved estimate lines are not silently repriced when the live catalog changes. The estimator can still continue editing the reopened project and press **Save project** again; this updates the same project record instead of creating a duplicate.
+
+Project statuses are currently:
+
+- Draft
+- In review
+- Quoted
+- Approved
+- Lost
+
+The **Projects** page supports search, status filtering, reopening and archiving.
+
+### Project storage
+
+When Supabase is configured, project history is stored in the `projects` table. Without Supabase, local development falls back to `data/projects.json`.
+
+Run `project_history_schema.sql` once in the Supabase SQL Editor, or run the latest complete `supabase_schema.sql`.
+
+Uploaded drawing files and generated quotation PDF bytes are **not stored in project history yet**. They can be added later through Supabase Storage without changing the project snapshot model.
