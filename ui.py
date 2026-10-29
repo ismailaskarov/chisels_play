@@ -105,7 +105,6 @@ def show_sidebar(project_name=""):
         st.page_link("pages/Admin.py", label="Admin", icon=":material/admin_panel_settings:")
 
         st.divider()
-        st.caption("Light / Dark mode: ⋮ menu (top right). Your choice is remembered in this browser.")
 
         if project_name:
             st.markdown(
