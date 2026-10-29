@@ -2901,23 +2901,20 @@ final_price_for_history = float(
     or 0.0
 )
 
-save_col1, save_col2 = st.columns([1, 3])
-with save_col1:
-    save_clicked = st.button(
-        "Save project",
-        type="primary",
-        disabled=not project_name,
-        key="save_project_history_button",
+save_clicked = st.button(
+    "Save project",
+    type="primary",
+    disabled=not project_name,
+    key="save_project_history_button",
+)
+st.caption(
+    f"Storage: {project_storage_name()}. "
+    + (
+        "This will update the opened project."
+        if st.session_state.get("current_project_id")
+        else "This will create a new project history record."
     )
-with save_col2:
-    st.caption(
-        f"Storage: {project_storage_name()}. "
-        + (
-            "This will update the opened project."
-            if st.session_state.get("current_project_id")
-            else "This will create a new project history record."
-        )
-    )
+)
 
 if save_clicked:
     try:
