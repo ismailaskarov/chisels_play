@@ -303,6 +303,26 @@ def supabase_get_all(url, key, table, order, page_size=1000):
             return rows
 
 
+def supabase_health(tables, timeout=6):
+    url, key = get_supabase_config()
+    if not (url and key):
+        return {"backend": "local", "ok": False, "problems": []}
+    problems = []
+    for table in tables:
+        try:
+            response = requests.get(
+                f"{url}/rest/v1/{table}",
+                headers=supabase_headers(key),
+                params={"select": "*", "limit": 1},
+                timeout=timeout,
+            )
+        except Exception as error:
+            return {"backend": "supabase", "ok": False, "problems": [f"connection failed ({type(error).__name__})"]}
+        if response.status_code != 200:
+            problems.append(f"{table}: HTTP {response.status_code}")
+    return {"backend": "supabase", "ok": not problems, "problems": problems}
+
+
 def load_supabase_feedback(url, key):
     return supabase_get_all(url, key, "match_feedback", "source_key.asc")
 

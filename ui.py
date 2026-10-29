@@ -5,6 +5,15 @@ import streamlit as st
 
 
 LOGO_FILE = Path(__file__).resolve().parent / "data" / "logo.png"
+LOGO_LIGHT_FILE = Path(__file__).resolve().parent / "data" / "logo_light.png"
+STORAGE_TABLES = ("catalog_items", "match_feedback", "pricing_settings", "projects")
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def storage_status():
+    from feedback_store import supabase_health
+
+    return supabase_health(STORAGE_TABLES)
 
 
 def current_theme():
@@ -36,6 +45,7 @@ def apply_style():
     style = f"""
     <style>
     .stApp {{ background-color: {background}; color: {text}; }}
+    header[data-testid="stHeader"] {{ background-color: {background}; }}
     [data-testid="stSidebar"] {{ background-color: {secondary}; }}
     [data-testid="stSidebar"] * {{ color: {text}; }}
     h1, h2, h3, h4, h5, h6, p, label {{ color: {text}; }}
@@ -119,7 +129,7 @@ def apply_style():
 
 
 def show_sidebar(project_name=""):
-    st.logo(str(LOGO_FILE), size="large")
+    st.logo(str(LOGO_LIGHT_FILE if current_theme() == "Dark" else LOGO_FILE), size="large")
 
     with st.sidebar:
         st.page_link("app.py", label="Calculator", icon=":material/calculate:")
@@ -143,6 +153,18 @@ def show_sidebar(project_name=""):
                 f'<div class="cp-project">{escape(project_name)}</div>',
                 unsafe_allow_html=True,
             )
+
+        show_storage_status()
+
+
+def show_storage_status():
+    status = storage_status()
+    if status["backend"] == "local":
+        st.caption(":orange[●] Storage: local file — not kept when the app restarts")
+    elif status["ok"]:
+        st.caption(":green[●] Storage: Supabase · connected")
+    else:
+        st.caption(":red[●] Storage: Supabase · problem: " + "; ".join(status["problems"]))
 
 
 def show_header(title, caption):
