@@ -5,7 +5,6 @@ import streamlit as st
 
 
 LOGO_FILE = Path(__file__).resolve().parent / "data" / "logo.png"
-LOGO_LIGHT_FILE = Path(__file__).resolve().parent / "data" / "logo_light.png"
 STORAGE_TABLES = ("catalog_items", "match_feedback", "pricing_settings", "projects")
 
 
@@ -16,120 +15,86 @@ def storage_status():
     return supabase_health(STORAGE_TABLES)
 
 
-def current_theme():
-    return st.session_state.get("cp_theme", "Light")
+STYLE = """
+<style>
+img.stLogo {
+    background: #FFFFFF;
+    border-radius: 0.6rem;
+    padding: 0.35rem 0.6rem;
+    box-sizing: content-box;
+}
+.cp-step {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 2.25rem 0 0.35rem 0;
+    padding-bottom: 0.55rem;
+    border-bottom: 1px solid rgba(128, 118, 108, 0.30);
+}
+.cp-step-number {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 2rem;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    background: #A8622F;
+    color: #FFFFFF;
+    font-weight: 700;
+    font-size: 1rem;
+}
+.cp-step-title {
+    font-size: 1.45rem;
+    font-weight: 700;
+    color: inherit;
+}
+.cp-project {
+    display: inline-block;
+    margin-top: 0.15rem;
+    padding: 0.3rem 0.8rem;
+    border-radius: 999px;
+    background: rgba(156, 90, 46, 0.10);
+    border: 1px solid rgba(156, 90, 46, 0.35);
+    color: inherit;
+    font-weight: 600;
+    word-break: break-word;
+}
+.cp-muted {
+    opacity: 0.7;
+    font-size: 0.85rem;
+}
+[data-testid="stMetric"] {
+    background: rgba(156, 90, 46, 0.06);
+    border: 1px solid rgba(128, 118, 108, 0.28);
+    border-radius: 0.75rem;
+    padding: 0.8rem 1rem;
+}
+[data-testid="stExpander"] details {
+    border-radius: 0.75rem;
+}
+.cp-review-link {
+    display: inline-block;
+    text-decoration: none !important;
+    background: #A8622F;
+    color: #FFFFFF !important;
+    padding: 0.48rem 0.75rem;
+    border-radius: 0.45rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.cp-review-link:hover { opacity: 0.88; color: #FFFFFF !important; }
+</style>
+"""
 
 
 def apply_style():
-    dark = current_theme() == "Dark"
-
-    if dark:
-        background = "#161616"
-        secondary = "#202020"
-        card = "#242424"
-        text = "#F3F0EC"
-        muted = "#AAA49E"
-        border = "#3A3734"
-        input_bg = "#252321"
-        accent = "#B86E3A"
-    else:
-        background = "#FFFFFF"
-        secondary = "#FAF8F4"
-        card = "#FAF8F4"
-        text = "#23242A"
-        muted = "#6B6A70"
-        border = "#E4DDD2"
-        input_bg = "#F8F5F0"
-        accent = "#9C5A2E"
-
-    style = f"""
-    <style>
-    .stApp {{ background-color: {background}; color: {text}; }}
-    header[data-testid="stHeader"] {{ background-color: {background}; }}
-    [data-testid="stSidebar"] {{ background-color: {secondary}; }}
-    [data-testid="stSidebar"] * {{ color: {text}; }}
-    h1, h2, h3, h4, h5, h6, p, label {{ color: {text}; }}
-
-    .cp-step {{
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        margin: 2.25rem 0 0.35rem 0;
-        padding-bottom: 0.55rem;
-        border-bottom: 1px solid {border};
-    }}
-    .cp-step-number {{
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        flex: 0 0 2rem;
-        width: 2rem;
-        height: 2rem;
-        border-radius: 50%;
-        background: {accent};
-        color: #FFFFFF;
-        font-weight: 700;
-        font-size: 1rem;
-    }}
-    .cp-step-title {{
-        font-size: 1.45rem;
-        font-weight: 700;
-        color: {text};
-    }}
-    .cp-project {{
-        display: inline-block;
-        margin-top: 0.15rem;
-        padding: 0.3rem 0.8rem;
-        border-radius: 999px;
-        background: {card};
-        border: 1px solid {border};
-        color: {text};
-        font-weight: 600;
-        word-break: break-word;
-    }}
-    .cp-muted {{ color: {muted}; font-size: 0.85rem; }}
-
-    [data-testid="stMetric"] {{
-        background: {card};
-        border: 1px solid {border};
-        border-radius: 0.75rem;
-        padding: 0.8rem 1rem;
-    }}
-    [data-testid="stMetric"] * {{ color: {text}; }}
-    [data-testid="stExpander"] details {{
-        border: 1px solid {border};
-        border-radius: 0.75rem;
-        background: {secondary};
-    }}
-
-    div[data-baseweb="input"] > div,
-    div[data-baseweb="textarea"] > div,
-    div[data-baseweb="select"] > div {{
-        background-color: {input_bg};
-        border-color: {border};
-        color: {text};
-    }}
-    input, textarea {{ color: {text} !important; }}
-
-    .cp-review-link {{
-        display: inline-block;
-        text-decoration: none !important;
-        background: {accent};
-        color: #FFFFFF !important;
-        padding: 0.48rem 0.75rem;
-        border-radius: 0.45rem;
-        font-size: 0.88rem;
-        font-weight: 600;
-        white-space: nowrap;
-    }}
-    .cp-review-link:hover {{ opacity: 0.88; color: #FFFFFF !important; }}
-    </style>
-    """
-    st.markdown(style, unsafe_allow_html=True)
+    st.markdown(STYLE, unsafe_allow_html=True)
 
 
 def show_sidebar(project_name=""):
-    st.logo(str(LOGO_LIGHT_FILE if current_theme() == "Dark" else LOGO_FILE), size="large")
+    st.logo(str(LOGO_FILE), size="large")
 
     with st.sidebar:
         st.page_link("app.py", label="Calculator", icon=":material/calculate:")
@@ -140,12 +105,7 @@ def show_sidebar(project_name=""):
         st.page_link("pages/Admin.py", label="Admin", icon=":material/admin_panel_settings:")
 
         st.divider()
-        st.radio(
-            "Appearance",
-            ["Light", "Dark"],
-            horizontal=True,
-            key="cp_theme",
-        )
+        st.caption("Light / Dark mode: ⋮ menu (top right). Your choice is remembered in this browser.")
 
         if project_name:
             st.markdown(

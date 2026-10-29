@@ -2,13 +2,6 @@
 showSidebarNavigation = false
 
 [theme]
-base = "light"
-primaryColor = "#9C5A2E"
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F6F3EE"
-textColor = "#23242A"
-linkColor = "#9C5A2E"
-borderColor = "#E4DDD2"
 showWidgetBorder = true
 showSidebarBorder = true
 baseRadius = "0.6rem"
@@ -16,6 +9,27 @@ buttonRadius = "0.6rem"
 headingFontWeights = [700, 700, 650, 600, 600, 600]
 metricValueFontWeight = 700
 
-[theme.sidebar]
+[theme.light]
+primaryColor = "#9C5A2E"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F6F3EE"
+textColor = "#23242A"
+linkColor = "#9C5A2E"
+borderColor = "#E4DDD2"
+
+[theme.light.sidebar]
 backgroundColor = "#F6F3EE"
 secondaryBackgroundColor = "#FFFFFF"
+
+[theme.dark]
+primaryColor = "#C77A44"
+backgroundColor = "#171615"
+secondaryBackgroundColor = "#262422"
+textColor = "#F3F0EC"
+linkColor = "#D99060"
+borderColor = "#3B3835"
+dataframeHeaderBackgroundColor = "#2D2A27"
+
+[theme.dark.sidebar]
+backgroundColor = "#1F1D1B"
+secondaryBackgroundColor = "#2B2926"
