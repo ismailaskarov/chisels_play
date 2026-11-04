@@ -135,6 +135,10 @@ DEFAULT_SESSION_STATE = {
     "door_count": 0,
     "shelf_count": 0,
     "drawing_notes": "",
+    "drawing_instructions": "",
+    "drawing_file_names": [],
+    "drawing_primary_file_name": "",
+    "drawing_upload_version": 0,
     "ai_result": None,
     "ai_parts": [],
     "catalog_matches": None,
@@ -1174,6 +1178,10 @@ def clear_product():
         "drawing_notes"
     ] = ""
 
+    st.session_state["drawing_instructions"] = ""
+    st.session_state["drawing_file_names"] = []
+    st.session_state["drawing_primary_file_name"] = ""
+
     st.session_state[
         "ai_result"
     ] = None
@@ -1244,8 +1252,15 @@ def clear_product():
             key
         ]
 
-    # File uploader/project-name fallback state belongs to the current drawing.
-    st.session_state.pop("drawing_upload", None)
+    # Use a fresh uploader key on the next run. File-uploader state is read-only,
+    # so it must not be overwritten or deleted directly.
+    st.session_state["drawing_upload_version"] = int(
+        st.session_state.get("drawing_upload_version", 0)
+    ) + 1
+    st.session_state.pop("drawing_upload_signature", None)
+    st.session_state.pop("drawing_primary_picker", None)
+    st.session_state.pop("force_fresh_drawing_analysis", None)
+    st.session_state.pop("drawing_analysis_cache", None)
     st.session_state.pop("pending_project_name", None)
 
 
@@ -2850,6 +2865,9 @@ def _project_snapshot():
         "door_count",
         "shelf_count",
         "drawing_notes",
+        "drawing_instructions",
+        "drawing_file_names",
+        "drawing_primary_file_name",
         "ai_result",
         "ai_parts",
         "catalog_matches",
