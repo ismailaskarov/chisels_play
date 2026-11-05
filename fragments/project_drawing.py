@@ -6,7 +6,7 @@ import streamlit as st
 
 from component_matcher import match_parts_to_catalog
 from feedback_store import load_match_feedback
-from pdf_extractor import extract_furniture
+from pdf_extractor import extract_furniture, unique_file_names
 from project_store import PROJECT_STATUSES
 from ui import step_header
 from utils.performance import timed
@@ -28,25 +28,26 @@ def _analysis_hash(uploaded_files, primary_filename, instructions):
     digest.update(b"\0")
     digest.update(str(instructions or "").strip().encode("utf-8"))
 
-    for uploaded_file in uploaded_files:
-        file_bytes = uploaded_file.getvalue()
+    entries = sorted(
+        (str(uploaded_file.name), hashlib.sha256(uploaded_file.getvalue()).hexdigest())
+        for uploaded_file in uploaded_files
+    )
+    for name, file_digest in entries:
         digest.update(b"\0FILE\0")
-        digest.update(str(uploaded_file.name).encode("utf-8"))
+        digest.update(name.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(str(len(file_bytes)).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(file_bytes)
+        digest.update(file_digest.encode("ascii"))
 
     return digest.hexdigest()
 
 
-def _show_source_summary(uploaded_files, primary_index):
+def _show_source_summary(uploaded_files, file_names, primary_index):
     rows = []
     for index, uploaded_file in enumerate(uploaded_files):
         extension = _extension(uploaded_file.name)
         rows.append({
             "Role": "Primary technical source" if index == primary_index else "Supporting reference",
-            "File": uploaded_file.name,
+            "File": file_names[index],
             "Type": extension.upper(),
             "Size": f"{len(uploaded_file.getvalue()) / (1024 * 1024):.1f} MB",
         })
@@ -54,8 +55,8 @@ def _show_source_summary(uploaded_files, primary_index):
     st.dataframe(rows, hide_index=True, width="stretch")
 
     image_files = [
-        uploaded_file
-        for uploaded_file in uploaded_files
+        (uploaded_file, file_names[index])
+        for index, uploaded_file in enumerate(uploaded_files)
         if _extension(uploaded_file.name) in IMAGE_TYPES
     ]
     if not image_files:
@@ -63,11 +64,11 @@ def _show_source_summary(uploaded_files, primary_index):
 
     st.caption("Supporting image preview")
     columns = st.columns(min(3, len(image_files)))
-    for index, uploaded_file in enumerate(image_files[:6]):
+    for index, (uploaded_file, file_name) in enumerate(image_files[:6]):
         with columns[index % len(columns)]:
             st.image(
                 uploaded_file,
-                caption=uploaded_file.name,
+                caption=file_name,
                 width=260,
             )
     if len(image_files) > 6:
@@ -151,7 +152,7 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
         return
 
     uploaded_files = list(uploaded_files)
-    file_names = [uploaded_file.name for uploaded_file in uploaded_files]
+    file_names = unique_file_names(uploaded_file.name for uploaded_file in uploaded_files)
 
     # Reset the primary-file selector when the uploaded set changes.
     signature = tuple((uploaded_file.name, len(uploaded_file.getvalue())) for uploaded_file in uploaded_files)
@@ -169,7 +170,7 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
     previous_primary = str(st.session_state.get("drawing_primary_file_name") or "")
     default_option_position = 0
     for option_position, file_index in enumerate(primary_options):
-        if uploaded_files[file_index].name == previous_primary:
+        if file_names[file_index] == previous_primary:
             default_option_position = option_position
             break
 
@@ -177,14 +178,14 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
         "Primary technical source",
         options=primary_options,
         index=default_option_position,
-        format_func=lambda file_index: uploaded_files[file_index].name,
+        format_func=lambda file_index: file_names[file_index],
         key="drawing_primary_picker",
         help=(
             "Dimensions, quantities and construction details are taken primarily from this file. "
             "When a PDF is uploaded, only PDFs are offered as the primary technical source."
         ),
     )
-    primary_filename = uploaded_files[primary_index].name
+    primary_filename = file_names[primary_index]
 
     if pdf_indexes:
         st.info(
@@ -197,7 +198,7 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
             "Without a PDF, dimensions are used only when explicitly visible in an image."
         )
 
-    _show_source_summary(uploaded_files, primary_index)
+    _show_source_summary(uploaded_files, file_names, primary_index)
 
     total_size_mb = sum(len(uploaded_file.getvalue()) for uploaded_file in uploaded_files) / (1024 * 1024)
     st.caption(

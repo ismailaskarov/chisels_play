@@ -29,6 +29,14 @@ FAMILY_TERMS = {
 
 COMPATIBLE_FAMILIES = {frozenset(("glass", "mirror"))}
 GENERIC_COMPONENT_TYPES = {"", "other", "unknown", "generic"}
+COMPATIBLE_COMPONENT_TYPES = (
+    {"panel", "countertop", "worktop", "facade", "front", "board", "sheet", "shelf", "metal part"},
+    {"hardware", "fitting", "fittings", "handle", "hinge", "drawer system", "runner", "lock", "accessory"},
+    {"led", "led strip", "led profile", "lighting", "light"},
+    {"profile", "metal part", "edge", "edge banding"},
+    {"service", "installation", "assembly", "labor", "labour", "delivery", "measurement"},
+    {"glass", "mirror"},
+)
 INCOMPATIBILITY_PHRASES = (
     "incompatible",
     "not suitable",
@@ -144,6 +152,8 @@ def component_type_conflict(ai_part, selected_item):
     if source in GENERIC_COMPONENT_TYPES or target in GENERIC_COMPONENT_TYPES:
         return None
     if source == target or source in target or target in source:
+        return None
+    if any(source in group and target in group for group in COMPATIBLE_COMPONENT_TYPES):
         return None
     return f"Detected component type is {source}, while the catalog item type is {target}."
 
