@@ -34,6 +34,7 @@ from project_files import (
     save_project_files,
 )
 from fragments.project_drawing import render_project_and_drawing
+from fragments.evidence import render_source_evidence
 from fragments.review_summary import render_review_summary
 from fragments.quotation import render_quotation
 from fragments.treatments import render_surface_treatments, aggregate_treatment_items
@@ -433,6 +434,110 @@ def apply_ai_data(
     print(
         "AI extraction applied."
     )
+
+
+
+
+EVIDENCE_ATTRIBUTE_LABELS = {
+    "furniture_name": "Furniture name",
+    "furniture_type": "Furniture type",
+    "width_mm": "Width",
+    "height_mm": "Height",
+    "depth_mm": "Depth",
+    "doors": "Doors",
+    "hinged_doors": "Hinged doors",
+    "sliding_doors": "Sliding doors",
+    "door_height_mm": "Door height",
+    "shelves": "Shelves",
+    "drawers": "Drawers",
+    "component_type": "Component type",
+    "material": "Material",
+    "quantity": "Quantity",
+    "length_mm": "Length",
+    "width_mm": "Width",
+    "height_mm": "Height",
+    "thickness_mm": "Thickness",
+    "treatment": "Treatment / finish",
+}
+
+EVIDENCE_SOURCE_LABELS = {
+    "primary_pdf": "Primary PDF",
+    "supporting_pdf": "Supporting PDF",
+    "image": "Image",
+    "estimator_context": "Estimator context",
+    "derived": "Derived",
+}
+
+
+def _evidence_rows(evidence):
+    rows = []
+    for item in evidence or []:
+        if not isinstance(item, dict):
+            continue
+        confidence = float(item.get("confidence") or 0)
+        page = item.get("page")
+        source_file = str(item.get("source_file") or "").strip() or "Unknown source"
+        if page:
+            source_file += f" · page {page}"
+        rows.append({
+            "Attribute": EVIDENCE_ATTRIBUTE_LABELS.get(
+                str(item.get("attribute") or ""),
+                str(item.get("attribute") or "").replace("_", " ").title(),
+            ),
+            "Source": source_file,
+            "Source type": EVIDENCE_SOURCE_LABELS.get(
+                str(item.get("source_kind") or ""),
+                str(item.get("source_kind") or "").replace("_", " ").title(),
+            ),
+            "Evidence": str(item.get("evidence_text") or ""),
+            "Confidence %": confidence * 100,
+        })
+    return rows
+
+
+def show_source_evidence(evidence, *, key, expanded=False):
+    rows = _evidence_rows(evidence)
+    if not rows:
+        st.caption("No structured source evidence was returned for this item.")
+        return
+
+    low_count = sum(row["Confidence %"] < 80.0 for row in rows)
+    label = "Source evidence" + (f" · {low_count} low-confidence" if low_count else "")
+    with st.expander(label, expanded=expanded):
+        st.dataframe(
+            rows,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Confidence %": st.column_config.ProgressColumn(
+                    "Confidence",
+                    min_value=0.0,
+                    max_value=100.0,
+                    format="%.0f%%",
+                ),
+            },
+        )
+        if low_count:
+            st.warning(
+                f"{low_count} source-evidence item(s) are below 80% confidence and should be checked manually."
+            )
+
+
+def low_confidence_evidence_detail(part):
+    important = {"material", "quantity", "length_mm", "width_mm", "height_mm", "thickness_mm", "treatment"}
+    weak = []
+    for item in part.get("evidence") or []:
+        if not isinstance(item, dict):
+            continue
+        attribute = str(item.get("attribute") or "")
+        confidence = float(item.get("confidence") or 0)
+        if attribute in important and confidence < 0.80:
+            weak.append(
+                f"{EVIDENCE_ATTRIBUTE_LABELS.get(attribute, attribute)} {confidence * 100:.0f}%"
+            )
+    if not weak:
+        return None
+    return "Low-confidence source evidence: " + ", ".join(weak) + "."
 
 
 CHECK_LABELS = {
@@ -1379,6 +1484,32 @@ if st.session_state[
             )
 
 
+    render_source_evidence(st.session_state.get("ai_result") or {})
+
+
+    project_evidence = st.session_state["ai_result"].get("project_evidence") or []
+    if project_evidence:
+        with st.expander("Project-level source evidence", expanded=False):
+            st.dataframe(
+                _evidence_rows(project_evidence),
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "Confidence %": st.column_config.ProgressColumn(
+                        "Confidence", min_value=0.0, max_value=100.0, format="%.0f%%"
+                    ),
+                },
+            )
+            weak_project_evidence = sum(
+                float(item.get("confidence") or 0) < 0.80
+                for item in project_evidence
+                if isinstance(item, dict)
+            )
+            if weak_project_evidence:
+                st.warning(
+                    f"{weak_project_evidence} project-level value(s) have source evidence below 80% confidence."
+                )
+
     with st.expander(
         "Drawing extraction",
         expanded=False,
@@ -1419,6 +1550,12 @@ if st.session_state[
                     f'{part.get("width_mm") or "–"} × '
                     f'{part.get("height_mm") or "–"} mm'
                 ),
+            )
+
+            show_source_evidence(
+                part.get("evidence") or [],
+                key=f"drawing_evidence_{part.get('name', 'part')}_{id(part)}",
+                expanded=False,
             )
 
             st.divider()
@@ -1817,6 +1954,22 @@ if matches:
                 "Surface treatment",
                 warning,
             )
+
+        evidence_warning = low_confidence_evidence_detail(ai_part)
+        if evidence_warning:
+            add_review_issue(
+                review_issues,
+                part_index,
+                ai_part.get("name"),
+                "Source evidence",
+                evidence_warning,
+            )
+
+        show_source_evidence(
+            ai_part.get("evidence") or [],
+            key=f"review_evidence_{part_index}",
+            expanded=bool(evidence_warning),
+        )
 
         # ------------------------------------------
         # NO MATCH WORKFLOW
