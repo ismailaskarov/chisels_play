@@ -34,7 +34,6 @@ from project_files import (
     save_project_files,
 )
 from fragments.project_drawing import render_project_and_drawing
-from fragments.evidence import render_source_evidence
 from fragments.review_summary import render_review_summary
 from fragments.quotation import render_quotation
 from fragments.treatments import render_surface_treatments, aggregate_treatment_items
@@ -1482,9 +1481,6 @@ if st.session_state[
                 hide_index=True,
                 width="stretch",
             )
-
-
-    render_source_evidence(st.session_state.get("ai_result") or {})
 
 
     project_evidence = st.session_state["ai_result"].get("project_evidence") or []
