@@ -14,6 +14,10 @@ from utils.performance import timed
 
 SUPPORTED_TYPES = ["pdf", "jpg", "jpeg", "png"]
 IMAGE_TYPES = {"jpg", "jpeg", "png"}
+MAX_FILES = 10
+MAX_FILE_BYTES = 20 * 1024 * 1024
+MAX_TOTAL_BYTES = 50 * 1024 * 1024
+MAX_INSTRUCTION_CHARS = 10_000
 
 
 def _extension(filename):
@@ -23,7 +27,7 @@ def _extension(filename):
 def _analysis_hash(uploaded_files, primary_filename, instructions):
     """Hash the exact source set and context used for one AI extraction."""
     digest = hashlib.sha256()
-    digest.update(b"chisels-multifile-analysis-v1\0")
+    digest.update(b"chisels-multifile-analysis-v2\0")
     digest.update(str(primary_filename or "").encode("utf-8"))
     digest.update(b"\0")
     digest.update(str(instructions or "").strip().encode("utf-8"))
@@ -75,6 +79,29 @@ def _show_source_summary(uploaded_files, file_names, primary_index):
         st.caption(f"{len(image_files) - 6} additional image(s) are included in the analysis.")
 
 
+def _validate_uploads(uploaded_files):
+    errors = []
+    if len(uploaded_files) > MAX_FILES:
+        errors.append(f"Upload at most {MAX_FILES} files per analysis.")
+
+    total_bytes = 0
+    for uploaded_file in uploaded_files:
+        size = len(uploaded_file.getvalue())
+        total_bytes += size
+        if size > MAX_FILE_BYTES:
+            errors.append(
+                f'{uploaded_file.name} is {size / 1024 / 1024:.1f} MB; '
+                f'the per-file limit is {MAX_FILE_BYTES / 1024 / 1024:.0f} MB.'
+            )
+
+    if total_bytes > MAX_TOTAL_BYTES:
+        errors.append(
+            f'Total upload size is {total_bytes / 1024 / 1024:.1f} MB; '
+            f'the limit is {MAX_TOTAL_BYTES / 1024 / 1024:.0f} MB.'
+        )
+    return errors
+
+
 @st.fragment
 def render_project_and_drawing(all_items, apply_ai_data_fn):
     """Project metadata, estimator context and combined drawing analysis."""
@@ -123,6 +150,7 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
             "The text is analyzed together with all uploaded files."
         ),
         height=110,
+        max_chars=MAX_INSTRUCTION_CHARS,
     )
 
     uploader_version = int(st.session_state.get("drawing_upload_version", 0))
@@ -143,6 +171,7 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
         )
 
     if not uploaded_files:
+        st.session_state["pending_project_files"] = []
         saved_names = st.session_state.get("drawing_file_names") or []
         if saved_names:
             st.info(
@@ -152,6 +181,16 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
         return
 
     uploaded_files = list(uploaded_files)
+    upload_errors = _validate_uploads(uploaded_files)
+    if upload_errors:
+        for error in upload_errors:
+            st.error(error)
+        st.caption(
+            f"Limits: {MAX_FILES} files, {MAX_FILE_BYTES / 1024 / 1024:.0f} MB per file, "
+            f"{MAX_TOTAL_BYTES / 1024 / 1024:.0f} MB total."
+        )
+        return
+
     file_names = unique_file_names(uploaded_file.name for uploaded_file in uploaded_files)
 
     # Reset the primary-file selector when the uploaded set changes.
@@ -187,6 +226,18 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
     )
     primary_filename = file_names[primary_index]
 
+    st.session_state["pending_project_files"] = [
+        {
+            "name": file_names[index],
+            "original_name": uploaded_file.name,
+            "content_type": getattr(uploaded_file, "type", "") or "",
+            "bytes": uploaded_file.getvalue(),
+            "sha256": hashlib.sha256(uploaded_file.getvalue()).hexdigest(),
+            "primary_source": index == primary_index,
+        }
+        for index, uploaded_file in enumerate(uploaded_files)
+    ]
+
     if pdf_indexes:
         st.info(
             f'Primary technical drawing: **{primary_filename}**. '
@@ -203,7 +254,9 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
     total_size_mb = sum(len(uploaded_file.getvalue()) for uploaded_file in uploaded_files) / (1024 * 1024)
     st.caption(
         f"{len(uploaded_files)} file(s), {total_size_mb:.1f} MB total. "
-        "They are sent in one combined AI extraction request. More files may take longer and use more tokens."
+        "They are sent in one combined AI extraction request. More files may take longer and use more tokens. "
+        f"Limits: {MAX_FILES} files / {MAX_FILE_BYTES / 1024 / 1024:.0f} MB each / "
+        f"{MAX_TOTAL_BYTES / 1024 / 1024:.0f} MB total."
     )
 
     force_reanalyze = st.checkbox(

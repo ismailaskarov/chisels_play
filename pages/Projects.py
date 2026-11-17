@@ -3,6 +3,7 @@ from datetime import date
 import streamlit as st
 
 from project_store import PROJECT_STATUSES, archive_project, list_projects, project_storage_name
+from project_files import list_project_files, read_project_file, project_file_storage_name
 from ui import apply_style, show_header, show_sidebar
 
 
@@ -40,6 +41,8 @@ def _restore_project(project):
         "generated_quote_",
         "estimate_coefficient",
         "learning_conflict_",
+        "treatment_",
+        "autonomous_",
     )
     for key in list(st.session_state.keys()):
         if str(key).startswith(prefixes):
@@ -64,7 +67,21 @@ def _restore_project(project):
     st.session_state.pop("generated_quote_filename", None)
 
 
-st.caption(f"Storage: {project_storage_name()}")
+@st.cache_data(ttl=30, show_spinner=False)
+def _all_project_files():
+    return list_project_files()
+
+
+def _project_files(project_id):
+    return [
+        row for row in _all_project_files()
+        if row.get("project_id") == project_id
+    ]
+
+
+st.caption(
+    f"Project data: {project_storage_name()} · Source files: {project_file_storage_name()}"
+)
 
 try:
     projects = list_projects()
@@ -122,10 +139,50 @@ for project in filtered:
             snapshot = project.get("snapshot") or {}
             st.metric("Components", len(snapshot.get("items") or []))
 
+        with st.expander("Source files"):
+            try:
+                file_rows = _project_files(project["id"])
+            except Exception as error:
+                st.error(f"Source files could not be loaded: {error}")
+                file_rows = []
+
+            if not file_rows:
+                st.caption("No source files are stored for this project.")
+            else:
+                for file_row in file_rows:
+                    label = file_row.get("filename") or "file"
+                    if file_row.get("primary_source"):
+                        label += " · primary"
+                    size_kb = float(file_row.get("size_bytes") or 0) / 1024
+                    c1, c2 = st.columns([4, 1])
+                    with c1:
+                        st.write(f"**{label}**")
+                        st.caption(f"{size_kb:,.0f} KB")
+                    with c2:
+                        prepare_key = f'prepare_file_{project["id"]}_{file_row["id"]}'
+                        data_key = f'project_file_bytes_{file_row["id"]}'
+                        if st.button("Prepare", key=prepare_key):
+                            try:
+                                st.session_state[data_key] = read_project_file(file_row)
+                            except Exception as error:
+                                st.error(f"File could not be downloaded: {error}")
+                        if st.session_state.get(data_key) is not None:
+                            st.download_button(
+                                "Download",
+                                data=st.session_state[data_key],
+                                file_name=file_row.get("filename") or "project-file",
+                                mime=file_row.get("content_type") or "application/octet-stream",
+                                key=f'download_file_{project["id"]}_{file_row["id"]}',
+                            )
+
         a1, a2 = st.columns([1, 1])
         with a1:
             if st.button("Open project", key=f"open_project_{project['id']}", type="primary"):
                 _restore_project(project)
+                try:
+                    st.session_state["project_file_records"] = _project_files(project["id"])
+                except Exception:
+                    st.session_state["project_file_records"] = []
                 st.switch_page("app.py")
         with a2:
             if st.button("Archive", key=f"archive_project_{project['id']}"):

@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from io import BytesIO
 from pathlib import Path
 
@@ -67,6 +68,10 @@ FURNITURE_SCHEMA = {
         },
 
         "shelves": {
+            "type": ["integer", "null"]
+        },
+
+        "drawers": {
             "type": ["integer", "null"]
         },
 
@@ -149,6 +154,18 @@ FURNITURE_SCHEMA = {
                     "confidence": {
                         "type": "number"
                     },
+
+                    "recommended_treatments": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["painting", "lacquering"]
+                        }
+                    },
+
+                    "treatment_reason": {
+                        "type": "string"
+                    },
                 },
 
                 "required": [
@@ -162,6 +179,8 @@ FURNITURE_SCHEMA = {
                     "thickness_mm",
                     "source_context",
                     "confidence",
+                    "recommended_treatments",
+                    "treatment_reason",
                 ],
 
                 "additionalProperties": False,
@@ -172,6 +191,51 @@ FURNITURE_SCHEMA = {
             "type": "array",
             "items": {
                 "type": "string"
+            },
+        },
+
+        "source_conflicts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "enum": ["project", "part"]
+                    },
+                    "part_name": {
+                        "type": "string"
+                    },
+                    "attribute": {
+                        "type": "string"
+                    },
+                    "primary_source": {
+                        "type": "string"
+                    },
+                    "primary_value": {
+                        "type": "string"
+                    },
+                    "conflicting_source": {
+                        "type": "string"
+                    },
+                    "conflicting_value": {
+                        "type": "string"
+                    },
+                    "description": {
+                        "type": "string"
+                    },
+                },
+                "required": [
+                    "scope",
+                    "part_name",
+                    "attribute",
+                    "primary_source",
+                    "primary_value",
+                    "conflicting_source",
+                    "conflicting_value",
+                    "description",
+                ],
+                "additionalProperties": False,
             },
         },
     },
@@ -187,10 +251,12 @@ FURNITURE_SCHEMA = {
         "sliding_doors",
         "door_height_mm",
         "shelves",
+        "drawers",
         "notes",
         "materials",
         "parts",
         "uncertain",
+        "source_conflicts",
     ],
 
     "additionalProperties": False,
@@ -356,6 +422,29 @@ CRITICAL RULES:
 26. Hinges that are not explicitly listed may later be derived automatically
     by Python from confirmed hinged doors. Therefore do not invent a hinge
     quantity yourself.
+
+27. Count actual drawers when they can be identified reliably. Set drawers to
+    null when the count is ambiguous. Do not count cabinet doors or open shelves.
+
+28. Surface treatment suggestions:
+    - For each physical furniture part, set recommended_treatments to zero or more
+      of: painting, lacquering.
+    - Suggest painting when the source explicitly requires paint/colour coating or
+      the unfinished substrate clearly needs painted finishing.
+    - Suggest lacquering when the source explicitly requires lacquer/varnish/clear
+      coat or when an unfinished visible wood surface clearly needs a protective
+      clear finish.
+    - Do not automatically suggest treatment for factory-finished melamine/LMDP,
+      glass, mirror, hardware, LED, services, or parts already described as finished.
+    - treatment_reason must briefly cite the source evidence, or be empty when no
+      treatment is suggested.
+
+29. Source conflicts must be reported in source_conflicts. When a supporting PDF,
+    image or estimator instruction contradicts the PRIMARY TECHNICAL SOURCE, keep
+    the primary-source value in the final fields and record both values, sources and
+    the affected attribute. Use scope=part and part_name for component conflicts;
+    use scope=project for overall dimensions/counts. Do not silently choose between
+    contradictory values.
 """
 
 
@@ -488,6 +577,8 @@ def add_derived_hinges(ai_result):
             f"{per_door} hinges per door"
         ),
         "confidence": 1.0,
+        "recommended_treatments": [],
+        "treatment_reason": "",
     })
 
     ai_result["parts"] = parts
@@ -504,8 +595,248 @@ def add_derived_hinges(ai_result):
     return ai_result
 
 
-def post_process_result(result):
-    return add_derived_hinges(result)
+def explicit_drawer_mechanisms_exist(parts):
+    words = (
+        "drawer runner", "drawer runners", "drawer mechanism", "drawer system",
+        "tandem", "movento", "metabox", "legrabox", "stalciaus begelis",
+        "stalciaus bėgelis", "stalciu begeliai", "stalčių bėgeliai",
+    )
+    for part in parts or []:
+        combined = " ".join((
+            str(part.get("name") or ""),
+            str(part.get("material") or ""),
+            str(part.get("source_context") or ""),
+        )).lower()
+        if any(word in combined for word in words):
+            return True
+    return False
+
+
+def add_derived_drawer_mechanisms(ai_result):
+    parts = ai_result.get("parts")
+    if not isinstance(parts, list):
+        parts = []
+
+    if explicit_drawer_mechanisms_exist(parts):
+        print("Explicit drawer mechanism found. No derived mechanism added.")
+        return ai_result
+
+    try:
+        drawers = int(ai_result.get("drawers"))
+    except (TypeError, ValueError):
+        drawers = 0
+
+    if drawers <= 0:
+        return ai_result
+
+    parts.append({
+        "name": "Drawer runner mechanism set",
+        "component_type": "hardware",
+        "material": "Drawer mechanism",
+        "quantity": drawers,
+        "length_mm": None,
+        "width_mm": None,
+        "height_mm": None,
+        "thickness_mm": None,
+        "source_context": f"Derived automatically from {drawers} confirmed drawer(s)",
+        "confidence": 0.95,
+        "recommended_treatments": [],
+        "treatment_reason": "",
+    })
+    ai_result["parts"] = parts
+    print("DERIVED DRAWER MECHANISMS:", drawers)
+    return ai_result
+
+
+def _normalise_part_name(value):
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _parse_conflict_value(value, current_value):
+    text = str(value or "").strip().replace(",", ".")
+    if current_value is None or isinstance(current_value, (int, float)):
+        import re
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if match:
+            number = float(match.group(0))
+            if isinstance(current_value, int):
+                return int(round(number))
+            return number
+    return text or current_value
+
+
+def apply_source_conflicts(ai_result):
+    conflicts = ai_result.get("source_conflicts")
+    if not isinstance(conflicts, list):
+        conflicts = []
+        ai_result["source_conflicts"] = conflicts
+
+    project_fields = {
+        "width_mm", "height_mm", "depth_mm", "doors", "hinged_doors",
+        "sliding_doors", "door_height_mm", "shelves", "drawers",
+    }
+    part_fields = {
+        "material", "quantity", "length_mm", "width_mm", "height_mm",
+        "thickness_mm", "component_type",
+    }
+
+    parts_by_name = {
+        _normalise_part_name(part.get("name")): part
+        for part in ai_result.get("parts") or []
+        if isinstance(part, dict)
+    }
+
+    for conflict in conflicts:
+        if not isinstance(conflict, dict):
+            continue
+        description = str(conflict.get("description") or "").strip()
+        if not description:
+            description = (
+                f'{conflict.get("attribute")}: primary source "{conflict.get("primary_value")}" '
+                f'conflicts with "{conflict.get("conflicting_value")}" from '
+                f'{conflict.get("conflicting_source") or "supporting context"}.'
+            )
+        add_uncertain_message(ai_result, description)
+
+        attribute = str(conflict.get("attribute") or "").strip()
+        if conflict.get("scope") == "project" and attribute in project_fields:
+            parsed = _parse_conflict_value(
+                conflict.get("primary_value"), ai_result.get(attribute)
+            )
+            if attribute in {"doors", "hinged_doors", "sliding_doors", "shelves", "drawers"} and isinstance(parsed, (int, float)):
+                parsed = int(round(parsed))
+            ai_result[attribute] = parsed
+        elif conflict.get("scope") == "part" and attribute in part_fields:
+            part = parts_by_name.get(_normalise_part_name(conflict.get("part_name")))
+            if part is not None:
+                part[attribute] = _parse_conflict_value(
+                    conflict.get("primary_value"), part.get(attribute)
+                )
+
+    return ai_result
+
+
+def ensure_part_defaults(ai_result):
+    for part in ai_result.get("parts") or []:
+        if not isinstance(part, dict):
+            continue
+        treatments = part.get("recommended_treatments")
+        if not isinstance(treatments, list):
+            treatments = []
+        part["recommended_treatments"] = [
+            value for value in treatments if value in {"painting", "lacquering"}
+        ]
+        part["treatment_reason"] = str(part.get("treatment_reason") or "")
+    return ai_result
+
+
+INSTRUCTION_FIELD_TERMS = {
+    "width_mm": ("width", "plotis"),
+    "height_mm": ("height", "aukstis", "aukštis"),
+    "depth_mm": ("depth", "gylis"),
+    "doors": ("doors", "door count", "duru kiekis", "durų kiekis"),
+    "drawers": ("drawers", "drawer count", "stalciu kiekis", "stalčių kiekis"),
+    "shelves": ("shelves", "shelf count", "lentynu kiekis", "lentynų kiekis"),
+}
+
+
+def add_instruction_conflicts(ai_result, user_instructions="", primary_filename=""):
+    """Deterministically compare clearly labelled instruction values with the primary result."""
+    text = str(user_instructions or "")
+    if not text.strip():
+        return ai_result
+
+    normalized = text.lower().replace(",", ".")
+    existing = ai_result.setdefault("source_conflicts", [])
+
+    def conflict_value_key(value):
+        match = re.search(r"-?\d+(?:[.,]\d+)?", str(value or ""))
+        return f"{float(match.group(0).replace(',', '.')):g}" if match else str(value or "").strip().lower()
+
+    existing_keys = {
+        (
+            str(item.get("scope")),
+            str(item.get("attribute")),
+            conflict_value_key(item.get("conflicting_value")),
+        )
+        for item in existing if isinstance(item, dict)
+    }
+
+    for attribute, terms in INSTRUCTION_FIELD_TERMS.items():
+        instruction_value = None
+        for term in terms:
+            pattern = rf"(?:{re.escape(term.lower())})\s*[:=\-]?\s*(\d+(?:\.\d+)?)"
+            match = re.search(pattern, normalized)
+            if match:
+                instruction_value = float(match.group(1))
+                break
+        if instruction_value is None:
+            continue
+
+        primary_value = ai_result.get(attribute)
+        try:
+            primary_number = float(primary_value)
+        except (TypeError, ValueError):
+            continue
+
+        tolerance = 1.0 if attribute.endswith("_mm") else 0.01
+        if abs(primary_number - instruction_value) <= tolerance:
+            continue
+
+        conflict_value = f"{instruction_value:g}"
+        key = ("project", attribute, conflict_value_key(conflict_value))
+        if key in existing_keys:
+            continue
+
+        unit = " mm" if attribute.endswith("_mm") else ""
+        description = (
+            f'Estimator instructions state {attribute} = {instruction_value:g}{unit}, '
+            f'but the primary technical source gives {primary_number:g}{unit}. '
+            "The primary-source value was kept."
+        )
+        existing.append({
+            "scope": "project",
+            "part_name": "",
+            "attribute": attribute,
+            "primary_source": str(primary_filename or "primary technical source"),
+            "primary_value": f"{primary_number:g}{unit}",
+            "conflicting_source": "estimator instructions",
+            "conflicting_value": f"{instruction_value:g}{unit}",
+            "description": description,
+        })
+        add_uncertain_message(ai_result, description)
+
+    # A generic labelled dimension cannot be mapped safely to width/height/depth,
+    # but it should still be surfaced when it conflicts with every primary dimension.
+    generic = re.search(
+        r"(?:dimension|size|measurement|matmuo|ölçü)\s*[:=\-]?\s*(\d+(?:\.\d+)?)",
+        normalized,
+    )
+    if generic:
+        value = float(generic.group(1))
+        primary_dimensions = [
+            float(ai_result[field])
+            for field in ("width_mm", "height_mm", "depth_mm")
+            if isinstance(ai_result.get(field), (int, float)) and ai_result.get(field)
+        ]
+        if primary_dimensions and all(abs(value - current) > 1 for current in primary_dimensions):
+            message = (
+                f"Estimator instructions contain an unlabelled dimension {value:g} mm that does not "
+                "match the primary width, height or depth. The primary technical values were kept; "
+                "the estimator should clarify which part/attribute the instruction refers to."
+            )
+            add_uncertain_message(ai_result, message)
+
+    return ai_result
+
+
+def post_process_result(result, user_instructions="", primary_filename=""):
+    result = ensure_part_defaults(result)
+    result = apply_source_conflicts(result)
+    result = add_instruction_conflicts(result, user_instructions, primary_filename)
+    result = add_derived_hinges(result)
+    result = add_derived_drawer_mechanisms(result)
+    return result
 
 
 # --------------------------------------------------
@@ -678,6 +1009,15 @@ MULTI-SOURCE ANALYSIS RULES:
     Mention them in uncertain only when they affect the furniture (for example an
     integrated appliance front or a cut-out).
 
+35. Populate source_conflicts whenever explicit values disagree. The primary_value
+    must be copied from the PRIMARY TECHNICAL SOURCE and must also be used in the
+    final project/part field. Never leave source_conflicts empty when you observed
+    a real contradiction.
+
+36. Count drawers and identify explicit drawer hardware. Python may add one generic
+    drawer-mechanism set per confirmed drawer only when the drawing does not already
+    specify the hardware.
+
 SOURCE MANIFEST:
 """
         + "\n".join(manifest_lines)
@@ -823,7 +1163,11 @@ def analyze_sources(
                 )
 
     result = json.loads(response.output_text)
-    result = post_process_result(result)
+    result = post_process_result(
+        result,
+        user_instructions=user_instructions,
+        primary_filename=primary_filename,
+    )
     result["source_files"] = [record["name"] for record in records]
     result["primary_source"] = primary_filename
     result["estimator_context"] = str(user_instructions or "").strip()

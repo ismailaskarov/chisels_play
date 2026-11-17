@@ -187,3 +187,28 @@ def archive_project(project_id, archived=True):
         return
     current.update(changes)
     _local_upsert(current)
+
+
+def delete_project(project_id):
+    """Permanently delete a project and its stored source files."""
+    current = get_project(project_id)
+    if current is None:
+        raise ValueError("Project no longer exists.")
+
+    from project_files import delete_project_files
+
+    delete_project_files(project_id)
+    url, key = get_supabase_config()
+    if url and key:
+        response = requests.delete(
+            f"{url}/rest/v1/{SUPABASE_TABLE}",
+            headers=supabase_headers(key),
+            params={"id": f"eq.{project_id}"},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return
+
+    with _file_lock:
+        rows = [row for row in _read_local() if row.get("id") != project_id]
+        _write_local(rows)

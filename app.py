@@ -29,9 +29,15 @@ from catalog_store import (
 )
 from ui import apply_style, show_header, show_sidebar, step_header
 from project_store import project_storage_name, save_project
+from project_files import (
+    project_file_storage_name,
+    save_project_files,
+)
 from fragments.project_drawing import render_project_and_drawing
 from fragments.review_summary import render_review_summary
 from fragments.quotation import render_quotation
+from fragments.treatments import render_surface_treatments, aggregate_treatment_items
+from fragments.autonomous_estimate import render_autonomous_estimate
 from utils.performance import timed
 from utils.match_safety import selection_conflict, should_auto_learn_match
 
@@ -133,6 +139,7 @@ DEFAULT_SESSION_STATE = {
     "overall_height": 0.0,
     "overall_depth": 0.0,
     "door_count": 0,
+    "drawer_count": 0,
     "shelf_count": 0,
     "drawing_notes": "",
     "drawing_instructions": "",
@@ -145,6 +152,8 @@ DEFAULT_SESSION_STATE = {
     "current_project_id": None,
     "project_status": "Draft",
     "project_service_rows": [],
+    "project_file_records": [],
+    "pending_project_files": [],
 }
 
 
@@ -281,6 +290,8 @@ def apply_ai_data(
         or 0
     )
 
+    st.session_state["drawer_count"] = int(ai_data.get("drawers") or 0)
+
 
     notes = (
         ai_data.get(
@@ -399,6 +410,10 @@ def apply_ai_data(
             str(key).startswith(
                 "learning_conflict_"
             )
+            or
+            str(key).startswith(
+                "treatment_"
+            )
         ):
             keys_to_delete.append(
                 key
@@ -409,6 +424,10 @@ def apply_ai_data(
         del st.session_state[
             key
         ]
+
+    st.session_state.pop("autonomous_estimate_result", None)
+    st.session_state.pop("autonomous_estimate_result_key", None)
+    st.session_state.pop("autonomous_estimate_cache", None)
 
 
     print(
@@ -1174,6 +1193,8 @@ def clear_product():
         "shelf_count"
     ] = 0
 
+    st.session_state["drawer_count"] = 0
+
     st.session_state[
         "drawing_notes"
     ] = ""
@@ -1197,6 +1218,11 @@ def clear_product():
     st.session_state["current_project_id"] = None
     st.session_state["project_status"] = "Draft"
     st.session_state["project_service_rows"] = []
+    st.session_state["project_file_records"] = []
+    st.session_state["pending_project_files"] = []
+    st.session_state.pop("autonomous_estimate_result", None)
+    st.session_state.pop("autonomous_estimate_result_key", None)
+    st.session_state.pop("autonomous_estimate_cache", None)
 
 
     keys_to_delete = []
@@ -1240,6 +1266,10 @@ def clear_product():
             or
             str(key).startswith(
                 "learning_conflict_"
+            )
+            or
+            str(key).startswith(
+                "treatment_"
             )
         ):
             keys_to_delete.append(
@@ -1323,6 +1353,31 @@ if st.session_state[
         "and catalog matches below."
     )
 
+    source_conflicts = (st.session_state.get("ai_result") or {}).get("source_conflicts") or []
+    if source_conflicts:
+        st.warning(
+            f"{len(source_conflicts)} source conflict(s) were detected. "
+            "Primary technical-source values were kept; review the differences below."
+        )
+        with st.expander("Source conflicts", expanded=True):
+            st.dataframe(
+                [
+                    {
+                        "Scope": conflict.get("scope"),
+                        "Part": conflict.get("part_name") or "Project",
+                        "Attribute": conflict.get("attribute"),
+                        "Primary source": conflict.get("primary_source"),
+                        "Primary value": conflict.get("primary_value"),
+                        "Other source": conflict.get("conflicting_source"),
+                        "Other value": conflict.get("conflicting_value"),
+                        "Explanation": conflict.get("description"),
+                    }
+                    for conflict in source_conflicts
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+
 
     with st.expander(
         "Drawing extraction",
@@ -1381,6 +1436,7 @@ matches = (
 
 
 confirmed_items = []
+priced_part_count = 0
 
 confirmed_choices = []
 
@@ -1746,6 +1802,21 @@ if matches:
                 st.rerun()
 
 
+
+        treatment_items, treatment_warnings = render_surface_treatments(
+            ai_part,
+            part_index,
+            valid_catalog_items,
+        )
+        confirmed_items.extend(treatment_items)
+        for warning in treatment_warnings:
+            add_review_issue(
+                review_issues,
+                part_index,
+                ai_part.get("name"),
+                "Surface treatment",
+                warning,
+            )
 
         # ------------------------------------------
         # NO MATCH WORKFLOW
@@ -2116,6 +2187,7 @@ if matches:
                 else "catalog"
             ),
         })
+        priced_part_count += 1
 
         if (
             not selected_item.get("market")
@@ -2131,6 +2203,9 @@ if matches:
             )
 
 
+confirmed_items = aggregate_treatment_items(confirmed_items)
+
+
 # --------------------------------------------------
 # NEEDS REVIEW SUMMARY (FRAGMENT)
 # --------------------------------------------------
@@ -2140,7 +2215,7 @@ st.session_state["current_review_issues"] = [
     for issue in review_issues
 ]
 
-render_review_summary(matches, review_issues, len(confirmed_items))
+render_review_summary(matches, review_issues, priced_part_count)
 
 
 # --------------------------------------------------
@@ -2615,6 +2690,7 @@ else:
                 "custom": "Custom item",
                 "market": "Market price",
                 "catalog": "Catalog",
+                "treatment": "Surface treatment",
             }.get(
                 item.get("source"),
                 "",
@@ -2839,6 +2915,15 @@ if st.session_state[
 
     render_quotation(result, project_name, LOGO_PATH)
 
+    st.divider()
+    render_autonomous_estimate(
+        st.session_state.get("ai_result") or {},
+        confirmed_items or st.session_state.get("items") or [],
+        float(result.get("total") or 0),
+        project_name,
+        st.session_state.get("drawing_instructions", ""),
+    )
+
 # --------------------------------------------------
 # PROJECT HISTORY SAVE
 # --------------------------------------------------
@@ -2863,11 +2948,15 @@ def _project_snapshot():
         "overall_height",
         "overall_depth",
         "door_count",
+        "drawer_count",
         "shelf_count",
         "drawing_notes",
         "drawing_instructions",
         "drawing_file_names",
         "drawing_primary_file_name",
+        "project_file_records",
+        "autonomous_estimate_result",
+        "autonomous_estimate_result_key",
         "ai_result",
         "ai_parts",
         "catalog_matches",
@@ -2897,6 +2986,11 @@ def _project_snapshot():
         "custom_price_",
         "custom_brand_",
         "custom_notes_",
+        "treatment_processes_",
+        "treatment_faces_",
+        "treatment_area_",
+        "treatment_catalog_",
+        "treatment_price_",
     )
     for key, value in st.session_state.items():
         key_text = str(key)
@@ -2926,7 +3020,7 @@ save_clicked = st.button(
     key="save_project_history_button",
 )
 st.caption(
-    f"Storage: {project_storage_name()}. "
+    f"Project data: {project_storage_name()}. Source files: {project_file_storage_name()}. "
     + (
         "This will update the opened project."
         if st.session_state.get("current_project_id")
@@ -2951,7 +3045,28 @@ if save_clicked:
             final_client_price=final_price_for_history,
         )
         st.session_state["current_project_id"] = saved["id"]
-        st.success("Project saved to history.")
+
+        pending_files = st.session_state.get("pending_project_files") or []
+        if pending_files:
+            try:
+                file_records = timed(
+                    "save_project_files",
+                    save_project_files,
+                    saved["id"],
+                    pending_files,
+                )
+                st.session_state["project_file_records"] = file_records
+                st.success(
+                    f'Project saved to history with {len(file_records)} source file(s).'
+                )
+            except Exception as file_error:
+                print("PROJECT FILE SAVE ERROR:", repr(file_error))
+                st.warning(
+                    "Project data was saved, but its uploaded source files could not be stored: "
+                    f"{file_error}"
+                )
+        else:
+            st.success("Project saved to history.")
     except Exception as error:
         print("PROJECT SAVE ERROR:", repr(error))
         st.error(f"Project could not be saved: {error}")

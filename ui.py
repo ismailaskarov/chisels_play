@@ -5,7 +5,13 @@ import streamlit as st
 
 
 LOGO_FILE = Path(__file__).resolve().parent / "data" / "logo.png"
-STORAGE_TABLES = ("catalog_items", "match_feedback", "pricing_settings", "projects")
+STORAGE_TABLES = (
+    "catalog_items",
+    "match_feedback",
+    "pricing_settings",
+    "projects",
+    "project_files",
+)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
