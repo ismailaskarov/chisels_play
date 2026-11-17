@@ -166,6 +166,24 @@ FURNITURE_SCHEMA = {
                     "treatment_reason": {
                         "type": "string"
                     },
+
+                    "treatment_scope": {
+                        "type": "string",
+                        "enum": [
+                            "none",
+                            "one_main_face",
+                            "both_main_faces",
+                            "one_main_face_and_edges",
+                            "both_main_faces_and_edges",
+                            "all_faces",
+                            "edges_only",
+                            "custom"
+                        ]
+                    },
+
+                    "treatment_scope_reason": {
+                        "type": "string"
+                    },
                 },
 
                 "required": [
@@ -181,6 +199,8 @@ FURNITURE_SCHEMA = {
                     "confidence",
                     "recommended_treatments",
                     "treatment_reason",
+                    "treatment_scope",
+                    "treatment_scope_reason",
                 ],
 
                 "additionalProperties": False,
@@ -438,6 +458,25 @@ CRITICAL RULES:
       glass, mirror, hardware, LED, services, or parts already described as finished.
     - treatment_reason must briefly cite the source evidence, or be empty when no
       treatment is suggested.
+    - treatment_scope describes which physical surfaces receive the suggested finish:
+      * none = no treatment suggested.
+      * one_main_face = one large face only.
+      * both_main_faces = front and back large faces, edges excluded.
+      * one_main_face_and_edges = one large face plus all perimeter edges.
+      * both_main_faces_and_edges = both large faces plus all perimeter edges.
+      * all_faces = every rectangular face is treated.
+      * edges_only = perimeter edges only.
+      * custom = treatment exists but the exact treated surfaces cannot be determined.
+    - For painted/lacquered furniture fronts or doors, use one_main_face_and_edges only
+      when the source/finish specification makes the visible face and perimeter edges
+      the intended treated surfaces. Do not assume the back is treated.
+    - If both sides are explicitly finished, use both_main_faces or
+      both_main_faces_and_edges according to the source.
+    - If the source says all sides/all surfaces are finished, use all_faces.
+    - If the finish is clear but the treated surfaces are not, use custom and mention
+      the uncertainty. Never invent a surface count.
+    - treatment_scope_reason must briefly explain the surface interpretation and source.
+      When no treatment is suggested, set treatment_scope=none and leave the reason empty.
 
 29. Source conflicts must be reported in source_conflicts. When a supporting PDF,
     image or estimator instruction contradicts the PRIMARY TECHNICAL SOURCE, keep
@@ -579,6 +618,8 @@ def add_derived_hinges(ai_result):
         "confidence": 1.0,
         "recommended_treatments": [],
         "treatment_reason": "",
+        "treatment_scope": "none",
+        "treatment_scope_reason": "",
     })
 
     ai_result["parts"] = parts
@@ -642,6 +683,8 @@ def add_derived_drawer_mechanisms(ai_result):
         "confidence": 0.95,
         "recommended_treatments": [],
         "treatment_reason": "",
+        "treatment_scope": "none",
+        "treatment_scope_reason": "",
     })
     ai_result["parts"] = parts
     print("DERIVED DRAWER MECHANISMS:", drawers)
@@ -727,6 +770,23 @@ def ensure_part_defaults(ai_result):
             value for value in treatments if value in {"painting", "lacquering"}
         ]
         part["treatment_reason"] = str(part.get("treatment_reason") or "")
+        allowed_scopes = {
+            "none",
+            "one_main_face",
+            "both_main_faces",
+            "one_main_face_and_edges",
+            "both_main_faces_and_edges",
+            "all_faces",
+            "edges_only",
+            "custom",
+        }
+        scope = str(part.get("treatment_scope") or "none")
+        if scope not in allowed_scopes:
+            scope = "custom" if part["recommended_treatments"] else "none"
+        if not part["recommended_treatments"]:
+            scope = "none"
+        part["treatment_scope"] = scope
+        part["treatment_scope_reason"] = str(part.get("treatment_scope_reason") or "")
     return ai_result
 
 

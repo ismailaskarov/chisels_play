@@ -2986,11 +2986,7 @@ def _project_snapshot():
         "custom_price_",
         "custom_brand_",
         "custom_notes_",
-        "treatment_processes_",
-        "treatment_faces_",
-        "treatment_area_",
-        "treatment_catalog_",
-        "treatment_price_",
+        "treatment_",
     )
     for key, value in st.session_state.items():
         key_text = str(key)

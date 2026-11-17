@@ -16,6 +16,16 @@ TREATMENT_TERMS = {
     ),
 }
 
+SCOPE_LABELS = {
+    "one_main_face": "One main face",
+    "both_main_faces": "Both main faces",
+    "one_main_face_and_edges": "One main face + edges",
+    "both_main_faces_and_edges": "Both main faces + edges",
+    "all_faces": "All faces",
+    "edges_only": "Edges only",
+    "custom": "Custom / unclear",
+}
+
 EXCLUDED_COMPONENT_TYPES = {"hardware", "service", "led", "glass", "mirror"}
 
 
@@ -34,30 +44,167 @@ def _positive(value):
     return number if number > 0 else None
 
 
-def _auto_area(ai_part, treated_faces=1):
-    quantity = _positive(ai_part.get("quantity")) or 1.0
+def _mm2_to_m2(value):
+    return float(value) / 1_000_000
+
+
+def _panel_geometry(ai_part):
+    length = _positive(ai_part.get("length_mm"))
+    width = _positive(ai_part.get("width_mm"))
+    thickness = _positive(ai_part.get("thickness_mm"))
+
+    if not length or not width:
+        return None
+
+    face_m2 = _mm2_to_m2(length * width)
+    edge_m2 = None
+    if thickness:
+        edge_m2 = _mm2_to_m2(2 * (length + width) * thickness)
+
+    return {
+        "length_mm": length,
+        "width_mm": width,
+        "thickness_mm": thickness,
+        "face_m2": face_m2,
+        "edge_m2": edge_m2,
+    }
+
+
+def _box_geometry(ai_part):
     length = _positive(ai_part.get("length_mm"))
     width = _positive(ai_part.get("width_mm"))
     height = _positive(ai_part.get("height_mm"))
-    thickness = _positive(ai_part.get("thickness_mm"))
+
+    if not length or not width or not height:
+        return None
+
+    return {
+        "length_mm": length,
+        "width_mm": width,
+        "height_mm": height,
+        "main_face_m2": _mm2_to_m2(length * width),
+        "all_faces_m2": _mm2_to_m2(
+            2 * (length * width + length * height + width * height)
+        ),
+    }
+
+
+def calculate_treatment_area(ai_part, scope, quantity=None):
+    """Return deterministic treatment geometry for one extracted physical part.
+
+    The function never invents a missing piece quantity. If quantity is unavailable,
+    the caller must ask the estimator for it or use a manual total area.
+    """
+    quantity = _positive(quantity if quantity is not None else ai_part.get("quantity"))
+    if quantity is None:
+        return {
+            "area_m2": None,
+            "per_piece_m2": None,
+            "quantity": None,
+            "breakdown": "Piece quantity is missing.",
+            "warning": "Piece quantity is missing, so treatment area cannot be calculated automatically.",
+        }
+
     component_type = _norm(ai_part.get("component_type"))
+    panel = _panel_geometry(ai_part)
 
-    if length and width and component_type in {"panel", "edge"}:
-        return length * width * quantity * max(1, treated_faces) / 1_000_000
+    if panel:
+        face = panel["face_m2"]
+        edge = panel["edge_m2"]
 
-    if length and (width or thickness) and component_type in {"profile", "other"}:
-        side_a = width or thickness
-        side_b = height or thickness
-        if side_a and side_b:
-            return 2 * (side_a + side_b) * length * quantity / 1_000_000
+        if scope == "one_main_face":
+            per_piece = face
+            detail = f"1 face × {face:.3f} m²"
+        elif scope == "both_main_faces":
+            per_piece = 2 * face
+            detail = f"2 faces × {face:.3f} m²"
+        elif scope == "edges_only":
+            if edge is None:
+                return {
+                    "area_m2": None,
+                    "per_piece_m2": None,
+                    "quantity": quantity,
+                    "breakdown": "Panel thickness is missing.",
+                    "warning": "Thickness is required to calculate painted/lacquered edges.",
+                }
+            per_piece = edge
+            detail = f"edges {edge:.3f} m²"
+        elif scope == "one_main_face_and_edges":
+            if edge is None:
+                return {
+                    "area_m2": None,
+                    "per_piece_m2": None,
+                    "quantity": quantity,
+                    "breakdown": "Panel thickness is missing.",
+                    "warning": "Thickness is required to include the edges automatically.",
+                }
+            per_piece = face + edge
+            detail = f"1 face {face:.3f} + edges {edge:.3f} m²"
+        elif scope in {"both_main_faces_and_edges", "all_faces"}:
+            if edge is None:
+                return {
+                    "area_m2": None,
+                    "per_piece_m2": None,
+                    "quantity": quantity,
+                    "breakdown": "Panel thickness is missing.",
+                    "warning": "Thickness is required to calculate all panel faces and edges.",
+                }
+            per_piece = 2 * face + edge
+            detail = f"2 faces {2 * face:.3f} + edges {edge:.3f} m²"
+        else:
+            return {
+                "area_m2": None,
+                "per_piece_m2": None,
+                "quantity": quantity,
+                "breakdown": "Custom treatment scope selected.",
+                "warning": "Choose a calculable surface scope or enter the total treatment area manually.",
+            }
 
-    if length and width and height:
-        return 2 * (length * width + length * height + width * height) * quantity / 1_000_000
+        total = per_piece * quantity
+        return {
+            "area_m2": total,
+            "per_piece_m2": per_piece,
+            "quantity": quantity,
+            "breakdown": f"{detail} × {quantity:g} pcs = {total:.3f} m²",
+            "warning": None,
+        }
 
-    if length and width:
-        return length * width * quantity * max(1, treated_faces) / 1_000_000
+    box = _box_geometry(ai_part)
+    if box:
+        if scope == "one_main_face":
+            per_piece = box["main_face_m2"]
+            detail = f"1 main face {per_piece:.3f} m²"
+        elif scope == "both_main_faces":
+            per_piece = 2 * box["main_face_m2"]
+            detail = f"2 main faces {per_piece:.3f} m²"
+        elif scope == "all_faces":
+            per_piece = box["all_faces_m2"]
+            detail = f"all rectangular faces {per_piece:.3f} m²"
+        else:
+            return {
+                "area_m2": None,
+                "per_piece_m2": None,
+                "quantity": quantity,
+                "breakdown": "This geometry does not support the selected automatic scope.",
+                "warning": "Automatic edge treatment needs panel thickness/geometry; use manual total area for this part.",
+            }
 
-    return 0.0
+        total = per_piece * quantity
+        return {
+            "area_m2": total,
+            "per_piece_m2": per_piece,
+            "quantity": quantity,
+            "breakdown": f"{detail} × {quantity:g} pcs = {total:.3f} m²",
+            "warning": None,
+        }
+
+    return {
+        "area_m2": None,
+        "per_piece_m2": None,
+        "quantity": quantity,
+        "breakdown": "Not enough dimensions for automatic surface calculation.",
+        "warning": "Length and width are required for automatic treatment-area calculation.",
+    }
 
 
 def _matching_catalog_items(catalog_items, treatment):
@@ -80,6 +227,17 @@ def _matching_catalog_items(catalog_items, treatment):
     return [item for _, item in matches]
 
 
+def _default_scope(ai_part):
+    scope = str(ai_part.get("treatment_scope") or "").strip()
+    if scope in SCOPE_LABELS:
+        return scope
+
+    component_type = _norm(ai_part.get("component_type"))
+    if component_type == "panel":
+        return "one_main_face"
+    return "custom"
+
+
 def render_surface_treatments(ai_part, part_index, catalog_items):
     """Return (price_items, review_messages) for treatments selected under one part."""
     component_type = _norm(ai_part.get("component_type"))
@@ -92,8 +250,7 @@ def render_surface_treatments(ai_part, part_index, catalog_items):
         return [], []
 
     with st.expander(
-        "Surface treatment"
-        + (" · AI suggestion" if suggestions else ""),
+        "Paint / lacquer" + (" · AI suggestion" if suggestions else ""),
         expanded=bool(suggestions),
     ):
         if suggestions:
@@ -110,43 +267,90 @@ def render_surface_treatments(ai_part, part_index, catalog_items):
             default=suggestions,
             format_func=lambda value: TREATMENT_LABELS[value],
             key=f"treatment_processes_{part_index}",
-            help="Add or remove processes before using the estimate.",
+            help="Select every finish process that applies to this physical part.",
         )
 
         if not choices:
             return [], []
 
-        treated_faces = 1
-        if _norm(ai_part.get("component_type")) in {"panel", "edge"}:
-            treated_faces = st.number_input(
-                "Treated faces",
-                min_value=1,
-                max_value=2,
-                value=1,
-                step=1,
-                key=f"treatment_faces_{part_index}",
-            )
-
-        calculated_area = _auto_area(ai_part, treated_faces)
-        area = st.number_input(
-            "Treatment area (m²)",
-            min_value=0.0,
-            value=float(round(calculated_area, 3)),
-            step=0.1,
-            format="%.3f",
-            key=f"treatment_area_{part_index}",
+        scope_options = list(SCOPE_LABELS)
+        suggested_scope = _default_scope(ai_part)
+        scope = st.selectbox(
+            "Painted / lacquered surfaces",
+            options=scope_options,
+            index=scope_options.index(suggested_scope),
+            format_func=lambda value: SCOPE_LABELS[value],
+            key=f"treatment_scope_{part_index}",
             help=(
-                "Calculated from the detected dimensions and quantity. "
-                "Adjust it when only selected surfaces are treated."
+                "The calculation uses the part dimensions. For panels, edges use the detected thickness. "
+                "Change this only when the drawing/finish specification requires a different surface set."
             ),
         )
 
-        if calculated_area > 0:
-            st.caption(f"Automatic area before adjustment: {calculated_area:.3f} m²")
+        scope_reason = str(ai_part.get("treatment_scope_reason") or "").strip()
+        if scope_reason:
+            st.caption(f"AI surface interpretation: {scope_reason}")
+
+        detected_quantity = _positive(ai_part.get("quantity"))
+        quantity = detected_quantity
+        if detected_quantity is None:
+            st.warning("The drawing did not provide a reliable piece quantity for this part.")
+            quantity = st.number_input(
+                "Piece quantity for treatment",
+                min_value=0.0,
+                value=1.0,
+                step=1.0,
+                key=f"treatment_quantity_{part_index}",
+            )
+
+        auto = calculate_treatment_area(ai_part, scope, quantity=quantity)
+        can_auto = auto["area_m2"] is not None and auto["area_m2"] > 0
+
+        mode_options = ["Automatic from dimensions", "Manual total area"]
+        default_mode = "Automatic from dimensions" if can_auto else "Manual total area"
+        area_mode = st.radio(
+            "Area calculation",
+            mode_options,
+            index=mode_options.index(default_mode),
+            horizontal=True,
+            key=f"treatment_area_mode_{part_index}",
+        )
 
         review_messages = []
+
+        if area_mode == "Automatic from dimensions":
+            if can_auto:
+                area = float(auto["area_m2"])
+                st.success(f"Calculated treatment area: **{area:.3f} m²**")
+                st.caption(auto["breakdown"])
+            else:
+                area = 0.0
+                warning = auto.get("warning") or "Treatment area could not be calculated automatically."
+                st.warning(warning)
+                review_messages.append(warning)
+        else:
+            suggested_manual = float(auto["area_m2"] or 0.0)
+            area = st.number_input(
+                "Total treatment area (m²)",
+                min_value=0.0,
+                value=float(round(suggested_manual, 3)),
+                step=0.1,
+                format="%.3f",
+                key=f"treatment_manual_area_{part_index}",
+                help="Enter the total area across all pieces of this component.",
+            )
+            if can_auto:
+                st.caption(
+                    f"Automatic geometry would give {auto['area_m2']:.3f} m² ({auto['breakdown']})."
+                )
+
+        if scope == "custom" and area_mode == "Automatic from dimensions":
+            message = "Treatment surface scope is custom/unclear; use manual total area or choose a specific surface scope."
+            if message not in review_messages:
+                review_messages.append(message)
+
         if area <= 0:
-            review_messages.append("Surface treatment is selected but its area is zero.")
+            review_messages.append("Surface treatment is selected but its total area is zero.")
             return [], review_messages
 
         rows = []
@@ -195,6 +399,10 @@ def render_surface_treatments(ai_part, part_index, catalog_items):
                 "source": "treatment",
                 "treatment": treatment,
                 "base_part": ai_part.get("name") or "",
+                "treatment_scope": scope,
+                "piece_quantity": float(quantity or 0),
+                "area_source": "automatic" if area_mode == "Automatic from dimensions" else "manual",
+                "area_breakdown": auto.get("breakdown") or "",
             })
 
         return rows, review_messages
@@ -218,11 +426,20 @@ def aggregate_treatment_items(items):
             **item,
             "quantity": 0.0,
             "base_parts": [],
+            "treatment_details": [],
         })
         group["quantity"] += float(item.get("quantity") or 0)
         base_part = str(item.get("base_part") or "").strip()
         if base_part and base_part not in group["base_parts"]:
             group["base_parts"].append(base_part)
+        detail = {
+            "part": base_part,
+            "area_m2": float(item.get("quantity") or 0),
+            "scope": item.get("treatment_scope") or "",
+            "area_source": item.get("area_source") or "",
+            "breakdown": item.get("area_breakdown") or "",
+        }
+        group["treatment_details"].append(detail)
 
     for group in grouped.values():
         treatment = group.get("treatment")
