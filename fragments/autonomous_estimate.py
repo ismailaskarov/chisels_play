@@ -5,6 +5,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from utils.app_log import log_error, log_event
 from utils.performance import timed
 
 
@@ -167,10 +168,15 @@ def render_autonomous_estimate(ai_result, items, calculated_price, project_name,
             cache[cache_key] = result
             st.session_state["autonomous_estimate_result"] = result
             st.session_state["autonomous_estimate_result_key"] = cache_key
+            log_event(
+                "autonomous_estimate",
+                "Autonomous estimate finished",
+                typical=result.get("typical"),
+                comparables=len(result.get("comparables") or []),
+            )
         except Exception as error:
-            print("AUTONOMOUS ESTIMATE ERROR:", repr(error))
+            log_error("autonomous_estimate", "Autonomous estimate failed", error)
             st.error(f"Autonomous market estimate failed: {error}")
-            return
 
     if not result and st.session_state.get("autonomous_estimate_result_key") == cache_key:
         result = st.session_state.get("autonomous_estimate_result")

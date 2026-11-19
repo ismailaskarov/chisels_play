@@ -3,3 +3,4 @@ __pycache__/
 .streamlit/secrets.toml
 data/pricing_settings.json
 data/projects.json
+data/project_files/

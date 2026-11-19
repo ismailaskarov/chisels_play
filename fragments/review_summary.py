@@ -12,7 +12,6 @@ def render_review_summary(matches, review_issues, priced_count):
     total_parts = len(matches)
     priced_count = max(0, min(int(priced_count or 0), total_parts))
     unresolved_count = max(0, total_parts - priced_count)
-    issue_part_indexes = {issue.get("part_index") for issue in review_issues}
 
     r1, r2, r3, r4 = st.columns(4)
     with r1:

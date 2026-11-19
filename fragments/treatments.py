@@ -105,7 +105,6 @@ def calculate_treatment_area(ai_part, scope, quantity=None):
             "warning": "Piece quantity is missing, so treatment area cannot be calculated automatically.",
         }
 
-    component_type = _norm(ai_part.get("component_type"))
     panel = _panel_geometry(ai_part)
 
     if panel:
@@ -298,8 +297,9 @@ def render_surface_treatments(ai_part, part_index, catalog_items):
             quantity = st.number_input(
                 "Piece quantity for treatment",
                 min_value=0.0,
-                value=1.0,
+                value=None,
                 step=1.0,
+                placeholder="Enter the number of pieces",
                 key=f"treatment_quantity_{part_index}",
             )
 

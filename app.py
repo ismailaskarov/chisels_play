@@ -5,15 +5,12 @@ import streamlit as st
 
 from calculator import calculate_project
 from price_reader import read_price_data
-from pdf_extractor import extract_furniture
 from feedback_store import (
-    load_match_feedback,
     remove_match_vote,
     save_match_feedback,
 )
 
 from component_matcher import (
-    match_parts_to_catalog,
     calculate_quantity,
     is_valid_price_item,
     explain_match,
@@ -38,6 +35,7 @@ from fragments.review_summary import render_review_summary
 from fragments.quotation import render_quotation
 from fragments.treatments import render_surface_treatments, aggregate_treatment_items
 from fragments.autonomous_estimate import render_autonomous_estimate
+from utils.app_log import log_error, log_event
 from utils.performance import timed
 from utils.match_safety import selection_conflict, should_auto_learn_match
 
@@ -200,6 +198,25 @@ def get_markup(
 # --------------------------------------------------
 # APPLY AI EXTRACTION
 # --------------------------------------------------
+
+ESTIMATE_WIDGET_PREFIXES = (
+    "catalog_select_",
+    "catalog_quantity_",
+    "market_",
+    "quote_",
+    "custom_",
+    "no_match_resolution_",
+    "generated_quote_",
+    "estimate_coefficient",
+    "learning_conflict_",
+    "treatment_",
+)
+
+
+def clear_estimate_widget_keys():
+    for key in [key for key in st.session_state.keys() if str(key).startswith(ESTIMATE_WIDGET_PREFIXES)]:
+        del st.session_state[key]
+
 
 def apply_ai_data(
     ai_data
@@ -368,62 +385,7 @@ def apply_ai_data(
 
 
     # Clear old AI selection widgets.
-    keys_to_delete = []
-
-    for key in (
-        st.session_state.keys()
-    ):
-
-        if (
-            str(key).startswith(
-                "catalog_select_"
-            )
-            or
-            str(key).startswith(
-                "catalog_quantity_"
-            )
-            or
-            str(key).startswith(
-                "market_"
-            )
-            or
-            str(key).startswith(
-                "quote_"
-            )
-            or
-            str(key).startswith(
-                "custom_"
-            )
-            or
-            str(key).startswith(
-                "no_match_resolution_"
-            )
-            or
-            str(key).startswith(
-                "generated_quote_"
-            )
-            or
-            str(key).startswith(
-                "estimate_coefficient"
-            )
-            or
-            str(key).startswith(
-                "learning_conflict_"
-            )
-            or
-            str(key).startswith(
-                "treatment_"
-            )
-        ):
-            keys_to_delete.append(
-                key
-            )
-
-    for key in keys_to_delete:
-
-        del st.session_state[
-            key
-        ]
+    clear_estimate_widget_keys()
 
     st.session_state.pop("autonomous_estimate_result", None)
     st.session_state.pop("autonomous_estimate_result_key", None)
@@ -823,7 +785,7 @@ def show_market_check(
                         match["market_result"] = result
                         match.pop("market_error", None)
                     except Exception as error:
-                        print("MARKET PRICE ERROR:", repr(error))
+                        log_error("market", "Market price search failed", error, part=ai_part.get("name"))
                         match["market_error"] = str(error)
             st.rerun()
 
@@ -1329,62 +1291,7 @@ def clear_product():
     st.session_state.pop("autonomous_estimate_cache", None)
 
 
-    keys_to_delete = []
-
-    for key in (
-        st.session_state.keys()
-    ):
-
-        if (
-            str(key).startswith(
-                "catalog_select_"
-            )
-            or
-            str(key).startswith(
-                "catalog_quantity_"
-            )
-            or
-            str(key).startswith(
-                "market_"
-            )
-            or
-            str(key).startswith(
-                "quote_"
-            )
-            or
-            str(key).startswith(
-                "custom_"
-            )
-            or
-            str(key).startswith(
-                "no_match_resolution_"
-            )
-            or
-            str(key).startswith(
-                "generated_quote_"
-            )
-            or
-            str(key).startswith(
-                "estimate_coefficient"
-            )
-            or
-            str(key).startswith(
-                "learning_conflict_"
-            )
-            or
-            str(key).startswith(
-                "treatment_"
-            )
-        ):
-            keys_to_delete.append(
-                key
-            )
-
-    for key in keys_to_delete:
-
-        del st.session_state[
-            key
-        ]
+    clear_estimate_widget_keys()
 
     # Use a fresh uploader key on the next run. File-uploader state is read-only,
     # so it must not be overwritten or deleted directly.
@@ -2549,12 +2456,13 @@ if confirmed_items:
                 ai_item=match.get("ai_price_item"),
             )
 
-        print(
-            "Estimate applied:",
-            len(
-                confirmed_items
-            ),
-            "components",
+        treatment_rows = [item for item in confirmed_items if item.get("source") == "treatment"]
+        log_event(
+            "estimate",
+            "Estimate applied",
+            components=len(confirmed_items),
+            treatment_lines=len(treatment_rows),
+            treatment_m2=round(sum(float(item.get("quantity") or 0) for item in treatment_rows), 3),
         )
 
         st.rerun()
@@ -3067,7 +2975,7 @@ if st.session_state[
     st.divider()
     render_autonomous_estimate(
         st.session_state.get("ai_result") or {},
-        confirmed_items or st.session_state.get("items") or [],
+        st.session_state.get("items") or [],
         float(result.get("total") or 0),
         project_name,
         st.session_state.get("drawing_instructions", ""),
@@ -3158,28 +3066,42 @@ final_price_for_history = float(
     or 0.0
 )
 
-save_clicked = st.button(
-    "Save project",
-    type="primary",
-    disabled=not project_name,
-    key="save_project_history_button",
-)
+opened_project_id = st.session_state.get("current_project_id")
+save_columns = st.columns([1, 1, 2]) if opened_project_id else [st.container()]
+with save_columns[0]:
+    save_clicked = st.button(
+        "Update project" if opened_project_id else "Save project",
+        type="primary",
+        disabled=not project_name,
+        key="save_project_history_button",
+    )
+save_as_new_clicked = False
+if opened_project_id:
+    with save_columns[1]:
+        save_as_new_clicked = st.button(
+            "Save as new project",
+            disabled=not project_name,
+            key="save_project_as_new_button",
+        )
 st.caption(
     f"Project data: {project_storage_name()}. Source files: {project_file_storage_name()}. "
     + (
-        "This will update the opened project."
-        if st.session_state.get("current_project_id")
+        "Update project overwrites the opened project; Save as new project keeps it unchanged."
+        if opened_project_id
         else "This will create a new project history record."
     )
 )
 
-if save_clicked:
+if save_clicked or save_as_new_clicked:
+    target_project_id = None if save_as_new_clicked else opened_project_id
+    if save_as_new_clicked and not st.session_state.get("pending_project_files"):
+        st.session_state["project_file_records"] = []
     try:
         saved = timed(
             "save_project",
             save_project,
             snapshot=_project_snapshot(),
-            project_id=st.session_state.get("current_project_id"),
+            project_id=target_project_id,
             project_name=project_name,
             client_name=st.session_state.get("quote_client_name", ""),
             status=st.session_state.get("project_status", "Draft"),
@@ -3190,6 +3112,14 @@ if save_clicked:
             final_client_price=final_price_for_history,
         )
         st.session_state["current_project_id"] = saved["id"]
+        log_event(
+            "project",
+            "Project saved",
+            project_id=saved["id"],
+            mode="new" if target_project_id is None else "update",
+            items=len(st.session_state.get("items") or []),
+            total=round(calculated_price_for_history, 2),
+        )
 
         pending_files = st.session_state.get("pending_project_files") or []
         if pending_files:
@@ -3205,7 +3135,7 @@ if save_clicked:
                     f'Project saved to history with {len(file_records)} source file(s).'
                 )
             except Exception as file_error:
-                print("PROJECT FILE SAVE ERROR:", repr(file_error))
+                log_error("project", "Source files could not be stored", file_error, project_id=saved["id"])
                 st.warning(
                     "Project data was saved, but its uploaded source files could not be stored: "
                     f"{file_error}"
@@ -3213,7 +3143,7 @@ if save_clicked:
         else:
             st.success("Project saved to history.")
     except Exception as error:
-        print("PROJECT SAVE ERROR:", repr(error))
+        log_error("project", "Project save failed", error, project_id=target_project_id)
         st.error(f"Project could not be saved: {error}")
 
 

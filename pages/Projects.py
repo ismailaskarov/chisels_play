@@ -27,6 +27,18 @@ def _parse_date(value):
         return None
 
 
+PROJECT_STATE_KEYS = {
+    "items", "furniture_name", "furniture_type", "overall_width", "overall_height",
+    "overall_depth", "door_count", "drawer_count", "shelf_count", "drawing_notes",
+    "drawing_instructions", "drawing_file_names", "drawing_primary_file_name",
+    "ai_result", "ai_parts", "catalog_matches", "current_review_issues",
+    "estimate_coefficients", "ai_multiplier", "final_multiplier",
+    "project_file_records", "pending_project_files", "drawing_analysis_cache",
+    "drawing_upload_signature", "drawing_primary_picker",
+    "force_fresh_drawing_analysis", "pending_project_name",
+}
+
+
 def _restore_project(project):
     snapshot = dict(project.get("snapshot") or {})
 
@@ -45,8 +57,11 @@ def _restore_project(project):
         "autonomous_",
     )
     for key in list(st.session_state.keys()):
-        if str(key).startswith(prefixes):
+        if str(key).startswith(prefixes) or key in PROJECT_STATE_KEYS:
             del st.session_state[key]
+    st.session_state["drawing_upload_version"] = int(
+        st.session_state.get("drawing_upload_version", 0)
+    ) + 1
 
     # The data editor has its own widget state. Restored service rows are supplied
     # back as default data by app.py instead.

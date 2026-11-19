@@ -12,6 +12,7 @@ from component_matcher import (
     safe_float,
     thickness_from_text,
 )
+from utils.app_log import log_event
 
 
 load_dotenv()
@@ -320,7 +321,7 @@ def search_market_prices(ai_part, price_item=None):
         "compare_per_unit": target_unit,
     }
 
-    print("Searching market prices for:", ai_part.get("name"))
+    log_event("market", "Market search started", part=ai_part.get("name"), unit=target_unit)
 
     response = client.responses.create(
         model="gpt-5.6-terra",
@@ -363,8 +364,12 @@ def search_market_prices(ai_part, price_item=None):
     summary["thickness_source"] = thickness_source
     summary["notes"] = result.get("notes", "")
 
-    print(
-        "Market prices:", summary["count"], "usable offers from", summary["shops"], "shops,",
-        len(summary["skipped"]), "skipped,", len(summary["groups"]), "thickness groups",
+    log_event(
+        "market",
+        "Market search finished",
+        part=ai_part.get("name"),
+        offers=summary["count"],
+        shops=summary["shops"],
+        skipped=len(summary["skipped"]),
     )
     return summary

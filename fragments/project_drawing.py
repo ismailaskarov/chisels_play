@@ -9,6 +9,7 @@ from feedback_store import load_match_feedback
 from pdf_extractor import extract_furniture, unique_file_names
 from project_store import PROJECT_STATUSES
 from ui import step_header
+from utils.app_log import log_error, log_event
 from utils.performance import timed
 
 
@@ -288,18 +289,8 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
                 and isinstance(cached_analysis.get("ai_data"), dict)
             ):
                 ai_data = deepcopy(cached_analysis["ai_data"])
-                print(
-                    "[CACHE] Reused combined AI extraction for",
-                    ", ".join(file_names),
-                    "(no new OpenAI extraction call)",
-                )
+                log_event("extraction", "Reused cached extraction", files=len(file_names))
             else:
-                print(
-                    "Starting combined drawing analysis:",
-                    ", ".join(file_names),
-                    "| primary:",
-                    primary_filename,
-                )
                 ai_data = timed(
                     "AI drawing extraction",
                     extract_furniture,
@@ -311,14 +302,6 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
                     "sha256": analysis_hash,
                     "ai_data": deepcopy(ai_data),
                 }
-
-            apply_ai_data_fn(ai_data)
-
-        st.session_state["drawing_file_names"] = file_names
-        st.session_state["drawing_primary_file_name"] = primary_filename
-
-        if not project_name:
-            st.session_state["pending_project_name"] = Path(primary_filename).stem
 
         with st.spinner("Loading learned corrections..."):
             feedback = timed(
@@ -334,16 +317,25 @@ def render_project_and_drawing(all_items, apply_ai_data_fn):
                 all_items,
                 feedback=feedback,
             )
-            st.session_state["catalog_matches"] = matches
-
-        print("Drawing analysis and catalog matching complete.")
-        st.rerun()
-
     except Exception as error:
-        print("AI PROCESSING ERROR:", repr(error))
-
-        if st.session_state.get("catalog_matches") is None:
-            st.session_state["ai_result"] = None
-            st.session_state["ai_parts"] = []
-
+        log_error("analysis", "Drawing analysis or catalog matching failed", error, primary=primary_filename)
         st.error(f"AI processing failed: {error}")
+        if st.session_state.get("catalog_matches"):
+            st.info("The previous drawing review and estimate were kept.")
+        return
+
+    apply_ai_data_fn(ai_data)
+    st.session_state["catalog_matches"] = matches
+    st.session_state["drawing_file_names"] = file_names
+    st.session_state["drawing_primary_file_name"] = primary_filename
+    if not project_name:
+        st.session_state["pending_project_name"] = Path(primary_filename).stem
+
+    log_event(
+        "matching",
+        "Catalog matching finished",
+        parts=len(matches or []),
+        no_match=sum(1 for match in matches or [] if not match.get("price_item")),
+        learned=sum(1 for match in matches or [] if match.get("learned")),
+    )
+    st.rerun()
